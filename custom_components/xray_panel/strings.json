@@ -1,0 +1,118 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Xray Panel",
+        "description": "xray-panel address. Username and password only if login is enabled in the panel.",
+        "data": {
+          "url": "Panel URL",
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Xray Panel login",
+        "description": "The panel requires login.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the panel",
+      "invalid_auth": "Invalid username or password"
+    },
+    "abort": {
+      "already_configured": "Already configured",
+      "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Xray Panel",
+        "data": {
+          "sidebar_title": "Sidebar title",
+          "admin_only": "Admins only"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "upload_rate": {
+        "name": "Upload rate"
+      },
+      "download_rate": {
+        "name": "Download rate"
+      },
+      "uploaded": {
+        "name": "Uploaded"
+      },
+      "downloaded": {
+        "name": "Downloaded"
+      },
+      "xray_uptime": {
+        "name": "Xray uptime"
+      },
+      "last_event": {
+        "name": "Last event"
+      },
+      "group_active": {
+        "name": "Active node"
+      },
+      "group_state": {
+        "name": "State",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "down": "Down",
+          "disabled": "Disabled"
+        }
+      },
+      "group_upload_rate": {
+        "name": "Upload rate"
+      },
+      "group_download_rate": {
+        "name": "Download rate"
+      },
+      "node_delay": {
+        "name": "Delay"
+      },
+      "node_upload_rate": {
+        "name": "Upload rate"
+      },
+      "node_download_rate": {
+        "name": "Download rate"
+      },
+      "node_uploaded": {
+        "name": "Uploaded"
+      },
+      "node_downloaded": {
+        "name": "Downloaded"
+      }
+    },
+    "binary_sensor": {
+      "xray_running": {
+        "name": "Xray running"
+      },
+      "node_alive": {
+        "name": "Reachable"
+      }
+    },
+    "select": {
+      "group_node": {
+        "name": "Node"
+      }
+    },
+    "button": {
+      "restart_xray": {
+        "name": "Restart xray"
+      },
+      "node_test": {
+        "name": "Test"
+      }
+    }
+  }
+}

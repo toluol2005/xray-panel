@@ -1,0 +1,9 @@
+/* xray-panel — 4 стиля оформления (ops / clean / glass / term) × тема Авто/Светлая/Тёмная.
+   Без сборки: обычные @import. tokens.css должен идти первым — в нём переменные. */
+@import url("/static/css/tokens.css");
+@import url("/static/css/base.css");
+@import url("/static/css/nav.css");
+@import url("/static/css/list.css");
+@import url("/static/css/controls.css");
+@import url("/static/css/overlay.css");
+@import url("/static/css/pages.css");

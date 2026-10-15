@@ -1,0 +1,580 @@
+"""Ядро панели: применение конфига, мониторинг, приоритеты, трафик, события, ТСПУ."""
+import asyncio
+import collections
+import json
+import os
+import socket
+import time
+
+import httpx
+
+from . import links, xraygen
+from .store import Store, ValidationError
+from .xray import Xray
+
+SAMPLE = 5            # шаг истории трафика, с
+HISTORY = 720         # точек истории (1 час)
+CHEBURCHECK = "https://cheburcheck.ru/api/v1/check"
+
+
+class ApplyError(Exception):
+    def __init__(self, message, detail=""):
+        super().__init__(message)
+        self.detail = detail
+
+
+class Panel:
+    def __init__(self, data_dir, xray_bin, asset_dir):
+        self.data_dir = data_dir
+        self.asset_dir = asset_dir
+        self.store = Store(data_dir)
+        self.xray = Xray(xray_bin, data_dir, asset_dir, self.event)
+        self.xray.line_listeners.append(self._on_line)
+        self.lock = asyncio.Lock()
+        self.events = collections.deque(maxlen=300)
+        self.meta = {"test_ports": {}}
+        # мониторинг
+        self.observatory = {}
+        self.node_rates = {}          # tag -> (up/s, down/s)
+        self.group_rates = {}
+        self.total_rate = (0, 0)
+        self._prev_stats = None
+        self._prev_ts = 0
+        self.overrides = {}           # gid -> применённое переопределение балансировщика
+        self.active = {}              # gid -> tag | None
+        self.prev_alive = {}
+        self.delay_hist = collections.defaultdict(lambda: collections.deque(maxlen=48))  # tag -> задержки проверок
+        self._last_try = {}
+        # трафик
+        self.hist_total = collections.deque(maxlen=HISTORY)
+        self.hist_nodes = collections.defaultdict(lambda: collections.deque(maxlen=HISTORY))
+        self._acc = collections.defaultdict(lambda: [0, 0])   # байты за текущий шаг истории
+        self._acc_total = [0, 0]
+        self._acc_ts = time.time()
+        self.totals = collections.defaultdict(lambda: {"up": 0, "down": 0})
+        self.days = self._load_json("traffic.json", {})
+        # подключения
+        self.recent = collections.deque(maxlen=200)
+        self.clients = {}
+        self.domains = {}
+        # ТСПУ
+        self.tspu = self._load_json("tspu.json", {})
+
+    # --- служебное -----------------------------------------------------------
+    def _load_json(self, name, default):
+        try:
+            with open(os.path.join(self.data_dir, name), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return default
+
+    def _save_json(self, name, data):
+        path = os.path.join(self.data_dir, name)
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+
+    def event(self, level, text):
+        self.events.appendleft({"ts": time.time(), "level": level, "text": text})
+
+    def tag_name(self, tag):
+        if tag in ("direct", "block"):
+            return {"direct": "напрямую", "block": "блокировка"}[tag]
+        n = self.store.node(tag)
+        return n["name"] if n else tag
+
+    # --- применение ----------------------------------------------------------
+    async def start(self):
+        await self.xray.detect_version()
+        config, self.meta = xraygen.build(self.store.state)
+        ok, out = await self.xray.test_config(config)
+        if not ok:
+            self.event("error", "Сохранённый конфиг не прошёл проверку xray: " + out[-300:])
+        self.xray.write_config(config)
+        await self.xray.start()
+        self.event("info", f"Панель запущена, xray {self.xray.version}")
+        asyncio.create_task(self._monitor_loop())
+        asyncio.create_task(self._tspu_loop())
+        asyncio.create_task(self._persist_loop())
+
+    async def apply(self, mutate, restart=True):
+        """Изменить состояние, проверить конфиг xray, сохранить и перезапустить.
+
+        При ошибке состояние откатывается и бросается ApplyError.
+        """
+        async with self.lock:
+            snap = self.store.snapshot()
+            try:
+                result = mutate()
+                config, meta = xraygen.build(self.store.state)
+                ok, out = await self.xray.test_config(config)
+                if not ok:
+                    raise ApplyError("xray отклонил конфигурацию", out)
+            except (ValidationError, ApplyError, KeyError) as e:
+                self.store.restore(snap)
+                if isinstance(e, KeyError):
+                    raise ApplyError("Объект не найден")
+                if isinstance(e, ValidationError):
+                    raise ApplyError(str(e))
+                raise
+            self.store.save()
+            self.meta = meta
+            self.xray.write_config(config)
+            if restart:
+                await self.xray.restart()
+                self.overrides.clear()
+                self._prev_stats = None
+            await self._apply_overrides()
+            return result
+
+    async def restart_xray(self):
+        async with self.lock:
+            await self.xray.restart()
+            self.overrides.clear()
+            self._prev_stats = None
+        self.event("info", "xray перезапущен вручную")
+
+    # --- приоритеты / закрепление ----------------------------------------------
+    def _alive(self, tag):
+        o = self.observatory.get(tag)
+        if o is None:
+            return None
+        return bool(o.get("alive"))
+
+    def _decide(self, g):
+        """Куда должен идти трафик группы: (override_target|None, active_tag|None)."""
+        members = [nid for nid in g["nodes"] if (self.store.node(nid) or {}).get("enabled")]
+        if not members:
+            return None, g["fallback"]
+        if g["pinned"]:
+            return g["pinned"], g["pinned"]
+        if g["strategy"] == "priority":
+            for nid in members:
+                if self._alive(nid) is not False:     # жив или ещё не проверен
+                    return nid, nid
+            return g["fallback"], g["fallback"]
+        alive = [nid for nid in members if self._alive(nid)]
+        if not alive:
+            return None, g["fallback"]
+        if g["strategy"] == "leastPing":
+            return None, min(alive, key=lambda t: self.observatory[t].get("delay", 1e9))
+        return None, None   # random — конкретный узел не определён
+
+    async def _apply_overrides(self):
+        if not self.xray.running:
+            return
+        for g in self.store.groups:
+            if not g["enabled"]:
+                continue
+            target, active = self._decide(g)
+            old_active = self.active.get(g["id"], "-")
+            self.active[g["id"]] = active
+            if old_active not in ("-", active) and active is not None:
+                level = "info" if g["nodes"] and active == g["nodes"][0] else "warn"
+                self.event(level, f"{g['name']}: {self.tag_name(old_active) if old_active else '—'} → {self.tag_name(active)}")
+            has_balancer = any(nid for nid in g["nodes"] if (self.store.node(nid) or {}).get("enabled"))
+            if not has_balancer or self.overrides.get(g["id"], "-") == target:
+                continue
+            ok, out = await self.xray.override("b-" + g["id"], target)
+            if ok:
+                self.overrides[g["id"]] = target
+            elif self.xray.running and time.time() - self.xray.started_at > 5:
+                self.event("error", f"{g['name']}: не удалось переключить балансировщик: {out.strip()[:200]}")
+
+    async def pin(self, gid, node):
+        g = self.store.group(gid)
+        if not g:
+            raise ApplyError("Группа не найдена")
+        if node not in (None, "direct", "block") and node not in g["nodes"]:
+            raise ApplyError("Узел не входит в группу")
+        async with self.lock:
+            g["pinned"] = node
+            self.store.save()
+            await self._apply_overrides()
+        self.event("info", f"{g['name']}: " + (f"закреплён «{self.tag_name(node)}»" if node else "автоматический выбор"))
+
+    # --- мониторинг ----------------------------------------------------------
+    async def _monitor_loop(self):
+        while True:
+            try:
+                await self._tick()
+            except Exception as e:                       # не роняем цикл
+                if self.xray.running and time.time() - self.xray.started_at > 10:
+                    self.event("warn", f"мониторинг: {e}")
+            await asyncio.sleep(2)
+
+    async def _tick(self):
+        if not self.xray.running:
+            return
+        obs, stats = await asyncio.to_thread(self.xray.metrics)
+        self.observatory = obs
+        now = time.time()
+        for tag, o in obs.items():
+            alive = bool(o.get("alive"))
+            prev = self.prev_alive.get(tag)
+            if prev is not None and prev != alive and self.store.node(tag):
+                if alive:
+                    self.event("info", f"узел «{self.tag_name(tag)}» снова доступен ({o.get('delay')} мс)")
+                else:
+                    reason = (o.get("last_error_reason") or "").split(">")[-1].strip()[:160]
+                    self.event("error", f"узел «{self.tag_name(tag)}» недоступен: {reason}")
+            self.prev_alive[tag] = alive
+            tried = o.get("last_try_time")
+            if tried and tried != self._last_try.get(tag):
+                self._last_try[tag] = tried
+                self.delay_hist[tag].append(o.get("delay") if alive else None)
+        self._account(stats, now)
+        await self._apply_overrides()
+
+    def _account(self, stats, now):
+        cur = {"outbound": {k: (v.get("uplink", 0), v.get("downlink", 0)) for k, v in stats.get("outbound", {}).items()},
+               "inbound": {k: (v.get("uplink", 0), v.get("downlink", 0)) for k, v in stats.get("inbound", {}).items()}}
+        prev, dt = self._prev_stats, now - self._prev_ts
+        self._prev_stats, self._prev_ts = cur, now
+        if prev is None or dt <= 0:
+            return
+        today = time.strftime("%Y-%m-%d")
+        day = self.days.setdefault(today, {})
+        tot_up = tot_down = 0
+        rates = {}
+        for tag, (u, d) in cur["outbound"].items():
+            pu, pd = prev["outbound"].get(tag, (0, 0))
+            du, dd = max(0, u - pu), max(0, d - pd)
+            rates[tag] = (du / dt, dd / dt)
+            if tag in ("block", "api") or tag.startswith("t-"):
+                continue
+            tot_up += du
+            tot_down += dd
+            if du or dd:
+                self.totals[tag]["up"] += du
+                self.totals[tag]["down"] += dd
+                rec = day.setdefault(tag, {"up": 0, "down": 0})
+                rec["up"] += du
+                rec["down"] += dd
+                self._acc[tag][0] += du
+                self._acc[tag][1] += dd
+        self.node_rates = rates
+        self.group_rates = {}
+        for tag, (u, d) in cur["inbound"].items():
+            pu, pd = prev["inbound"].get(tag, (0, 0))
+            self.group_rates[tag] = (max(0, u - pu) / dt, max(0, d - pd) / dt)
+        self.total_rate = (tot_up / dt, tot_down / dt)
+        self._acc_total[0] += tot_up
+        self._acc_total[1] += tot_down
+        span = now - self._acc_ts
+        if span >= SAMPLE:
+            ts = int(now)
+            self.hist_total.append([ts, round(self._acc_total[0] / span), round(self._acc_total[1] / span)])
+            keys = set(self.hist_nodes) | set(self._acc)
+            for tag in keys:
+                u, d = self._acc.get(tag, (0, 0))
+                self.hist_nodes[tag].append([ts, round(u / span), round(d / span)])
+            self._acc.clear()
+            self._acc_total = [0, 0]
+            self._acc_ts = now
+
+    async def _persist_loop(self):
+        while True:
+            await asyncio.sleep(60)
+            keep = sorted(self.days)[-31:]
+            self.days = {k: self.days[k] for k in keep}
+            self._save_json("traffic.json", self.days)
+
+    # --- журнал подключений --------------------------------------------------
+    def _on_line(self, item, acc):
+        if not acc:
+            return
+        inb = acc.group("inb")
+        if inb in ("api",) or inb.startswith("t-"):
+            return
+        dest = acc.group("dest")
+        host = dest.rsplit(":", 1)[0]
+        out = acc.group("out")
+        g = self.store.group(inb)
+        rec = {"ts": item["ts"], "src": acc.group("src").strip("[]"), "dest": dest,
+               "net": acc.group("net"), "inbound": g["name"] if g else inb,
+               "route": self.tag_name(out) if acc.group("verdict") == "accepted" else "отклонено",
+               "routeTag": out}
+        self.recent.appendleft(rec)
+        c = self.clients.setdefault(rec["src"], {"ip": rec["src"], "count": 0, "lastSeen": 0})
+        c["count"] += 1
+        c["lastSeen"] = item["ts"]
+        d = self.domains.setdefault(host, {"domain": host, "count": 0, "route": "", "lastSeen": 0})
+        d["count"] += 1
+        d["route"] = rec["route"]
+        d["lastSeen"] = item["ts"]
+        if len(self.domains) > 3000:
+            for k in sorted(self.domains, key=lambda k: self.domains[k]["lastSeen"])[:1000]:
+                del self.domains[k]
+
+    def connections(self):
+        return {
+            "recent": list(self.recent),
+            "clients": sorted(self.clients.values(), key=lambda c: -c["lastSeen"])[:100],
+            "domains": sorted(self.domains.values(), key=lambda d: -d["count"])[:100],
+        }
+
+    # --- статус --------------------------------------------------------------
+    def status(self):
+        x = self.xray
+        groups = []
+        for g in self.store.groups:
+            active = self.active.get(g["id"]) if g["enabled"] else None
+            members = [nid for nid in g["nodes"] if (self.store.node(nid) or {}).get("enabled")]
+            if not g["enabled"]:
+                state = "disabled"
+            elif not x.running:
+                state = "down"
+            elif active == "block" or (active is None and g["strategy"] != "random"):
+                state = "down"
+            elif active == "direct":
+                state = "down" if g["fallback"] == "block" else "degraded"
+            elif g["strategy"] == "priority" and members and active != members[0] and not g["pinned"]:
+                state = "degraded"
+            elif g["strategy"] == "random" and not any(self._alive(n) for n in members):
+                state = "degraded" if g["fallback"] == "direct" else "down"
+            else:
+                state = "ok"
+            if active:
+                active_name = self.tag_name(active)
+            elif g["strategy"] == "random":
+                active_name = f"случайный из {sum(1 for n in members if self._alive(n))} живых"
+            else:
+                active_name = "—"
+            ru, rd = self.group_rates.get(g["id"], (0, 0))
+            groups.append({k: g[k] for k in ("id", "name", "port", "enabled", "strategy", "fallback", "pinned", "routing")}
+                          | {"active": active, "activeName": active_name, "state": state,
+                             "upRate": round(ru), "downRate": round(rd)})
+        nodes = {}
+        for n in self.store.nodes:
+            o = self.observatory.get(n["id"])
+            ru, rd = self.node_rates.get(n["id"], (0, 0))
+            t = self.totals.get(n["id"], {"up": 0, "down": 0})
+            nodes[n["id"]] = {
+                "alive": (bool(o.get("alive")) if o else None) if n["enabled"] else False,
+                "delay": (o or {}).get("delay") if (o or {}).get("alive") else None,
+                "lastError": "" if not o or o.get("alive") else _short_reason(o.get("last_error_reason", "")),
+                "lastSeen": (o or {}).get("last_seen_time"), "lastTry": (o or {}).get("last_try_time"),
+                "upRate": round(ru), "downRate": round(rd), "up": t["up"], "down": t["down"],
+                "tspu": self.tspu.get(n["address"]) if not n.get("raw") else None,
+                "delayHist": list(self.delay_hist.get(n["id"], ())),
+            }
+        return {
+            "xray": {"running": x.running, "version": x.version, "pid": x.proc.pid if x.running else None,
+                     "uptime": int(time.time() - x.started_at) if x.running else 0,
+                     "restarts": x.restarts, "lastError": x.last_error},
+            "traffic": {"upRate": round(self.total_rate[0]), "downRate": round(self.total_rate[1]),
+                        "up": sum(t["up"] for t in self.totals.values()),
+                        "down": sum(t["down"] for t in self.totals.values())},
+            "groups": groups, "nodes": nodes, "events": list(self.events)[:20],
+        }
+
+    def traffic(self):
+        days = [{"date": d, "nodes": self.days[d]} for d in sorted(self.days, reverse=True)[:31]]
+        return {"interval": SAMPLE, "total": list(self.hist_total),
+                "nodes": {k: list(v) for k, v in self.hist_nodes.items()},
+                "totals": dict(self.totals), "days": days}
+
+    # --- ТСПУ / РКН (cheburcheck.ru) -------------------------------------------
+    async def tspu_check(self, target):
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=20, headers={"User-Agent": "xray-panel", "Accept": "application/json"}) as c:
+                r = await c.get(CHEBURCHECK, params={"target": target})
+            if r.status_code == 404:
+                return {"target": target, "blocked": False, "error": "не найдено", "checkedAt": int(time.time())}
+            if r.status_code == 429:
+                return {"target": target, "blocked": None, "error": "слишком много запросов, повторите позже",
+                        "checkedAt": int(time.time())}
+            r.raise_for_status()
+            d = r.json()
+        except Exception as e:
+            return {"target": target, "blocked": None, "error": f"cheburcheck недоступен: {e}", "checkedAt": int(time.time())}
+        geo = d.get("geo") or {}
+        return {"target": target, "blocked": bool(d.get("blocked")), "ips": d.get("ips", []),
+                "blockedSubnets": d.get("blocked_subnets", []), "location": geo.get("location", ""),
+                "org": geo.get("organisation", ""), "asn": geo.get("asn", ""), "country": geo.get("country_code", ""),
+                "rknDomain": d.get("rkn_domain"), "error": "", "checkedAt": int(time.time())}
+
+    async def tspu_refresh(self):
+        addrs = []
+        for n in self.store.nodes:
+            if n["address"] and not n.get("raw") and n["address"] not in addrs:
+                addrs.append(n["address"])
+        for a in addrs:
+            res = await self.tspu_check(a)
+            old = self.tspu.get(a)
+            if res["blocked"] is None and old and old.get("blocked") is not None:
+                old["error"] = res["error"]
+                continue
+            if old and old.get("blocked") is False and res["blocked"]:
+                self.event("error", f"ТСПУ: адрес {a} попал в реестр РКН!")
+            self.tspu[a] = res
+            await asyncio.sleep(2)
+        self._save_json("tspu.json", self.tspu)
+
+    async def _tspu_loop(self):
+        await asyncio.sleep(15)
+        while True:
+            try:
+                await self.tspu_refresh()
+            except Exception as e:
+                self.event("warn", f"ТСПУ-проверка: {e}")
+            await asyncio.sleep(self.store.state["settings"]["tspuInterval"] * 60)
+
+    # --- импорт --------------------------------------------------------------
+    async def import_links(self, text, gid=None):
+        text = text.strip()
+        errors = []
+        if text.startswith(("http://", "https://")) and "\n" not in text:
+            try:
+                async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
+                                             headers={"User-Agent": "v2rayN/7.0"}) as c:
+                    r = await c.get(text)
+                    r.raise_for_status()
+                    text = r.text
+            except Exception as e:
+                raise ApplyError("Не удалось скачать подписку", str(e))
+        parsed, errors = links.parse_text(text)
+        if not parsed:
+            raise ApplyError("Не найдено ни одной ссылки", "\n".join(errors))
+        added = []
+
+        def mutate():
+            for p in parsed:
+                try:
+                    added.append(self.store.add_node(p))
+                except ValidationError as e:
+                    errors.append(f"{p.get('name') or p.get('address')}: {e}")
+            g = self.store.group(gid) if gid else None
+            if g:
+                g["nodes"] += [n["id"] for n in added]
+        await self.apply(mutate)
+        return {"added": added, "errors": errors}
+
+    # --- диагностика узла ------------------------------------------------------
+    async def test_node(self, nid):
+        n = self.store.node(nid)
+        if not n:
+            raise ApplyError("Узел не найден")
+        steps, verdict = [], ""
+        seq0 = self.xray.seq
+        t_start = time.time()
+        addr = n["address"] or ((n.get("raw") or {}).get("settings", {}).get("vnext") or [{}])[0].get("address", "")
+        port = n["port"]
+        res = {"ok": False, "exitIp": "", "exitCountry": "", "latency": None}
+
+        # 1. DNS
+        ip = None
+        t = time.time()
+        try:
+            infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(addr, port, type=socket.SOCK_STREAM), 5)
+            ip = infos[0][4][0]
+            steps.append({"name": "DNS", "ok": True, "detail": ip, "ms": _ms(t)})
+        except Exception as e:
+            steps.append({"name": "DNS", "ok": False, "detail": str(e) or "не разрешается", "ms": _ms(t)})
+            verdict = "Имя сервера не разрешается в IP — проверьте адрес или DNS."
+
+        # 2. TCP
+        if ip:
+            t = time.time()
+            try:
+                _, w = await asyncio.wait_for(asyncio.open_connection(ip, port), 6)
+                w.close()
+                steps.append({"name": "TCP-подключение", "ok": True, "detail": f"{ip}:{port} открыт", "ms": _ms(t)})
+            except Exception as e:
+                steps.append({"name": "TCP-подключение", "ok": False, "detail": _err(e), "ms": _ms(t)})
+                verdict = ("Порт сервера не отвечает: сервер выключен, сменил порт, или IP заблокирован "
+                           "(ТСПУ режет соединение до рукопожатия).")
+
+        # 3. через прокси
+        tport = self.meta["test_ports"].get(nid)
+        if not n["enabled"]:
+            steps.append({"name": "Через прокси", "ok": False, "detail": "узел выключен", "ms": 0})
+            verdict = verdict or "Узел выключен — включите его, чтобы проверить работу через прокси."
+        elif tport and not verdict:
+            proxy = f"http://127.0.0.1:{tport}"
+            t = time.time()
+            try:
+                async with httpx.AsyncClient(trust_env=False, proxy=proxy, timeout=12) as c:
+                    r = await c.get(self.store.state["settings"]["probeURL"])
+                res["latency"] = _ms(t)
+                steps.append({"name": "Через прокси", "ok": r.status_code < 400,
+                              "detail": f"HTTP {r.status_code} за {res['latency']} мс", "ms": res["latency"]})
+                t = time.time()
+                async with httpx.AsyncClient(trust_env=False, proxy=proxy, timeout=12) as c:
+                    r = await c.get("http://ip-api.com/json/?fields=query,countryCode,country,isp")
+                    j = r.json()
+                res["exitIp"], res["exitCountry"] = j.get("query", ""), j.get("countryCode", "")
+                steps.append({"name": "Внешний IP", "ok": True,
+                              "detail": f"{j.get('query')} · {j.get('country', '')} · {j.get('isp', '')}", "ms": _ms(t)})
+                res["ok"] = True
+            except Exception as e:
+                steps.append({"name": "Через прокси", "ok": False, "detail": _err(e), "ms": _ms(t)})
+
+        # 4. ТСПУ
+        if addr:
+            tr = await self.tspu_check(addr)
+            if tr["blocked"] is not None:
+                self.tspu[addr] = tr
+            steps.append({"name": "ТСПУ / реестр РКН", "ok": tr["blocked"] is False,
+                          "detail": tr["error"] or (("В РЕЕСТРЕ: " + ", ".join(tr["blockedSubnets"] or [tr.get("rknDomain") or addr]))
+                                                    if tr["blocked"] else f"не в реестре ({tr['location']}, {tr['org']})")})
+
+        await asyncio.sleep(0.3)
+        logs = [x["text"] for x in self.xray.lines
+                if x["seq"] > seq0 and x["level"] != "access" and (nid in x["text"] or (ip and ip in x["text"]) or addr in x["text"]
+                                                                     or "reality" in x["text"].lower())]
+        joined = "\n".join(logs).lower()
+        if not res["ok"] and not verdict:
+            verdict = _diagnose(joined, n)
+        if res["ok"]:
+            verdict = f"Узел работает: выход через {res['exitIp']} ({res['exitCountry']}), задержка {res['latency']} мс."
+        o = self.observatory.get(nid)
+        if o and not o.get("alive") and o.get("last_error_reason"):
+            logs.append("observatory: " + o["last_error_reason"])
+        return res | {"verdict": verdict, "steps": steps, "logs": logs[-30:], "duration": _ms(t_start)}
+
+
+def _ms(t):
+    return int((time.time() - t) * 1000)
+
+
+def _err(e):
+    s = str(e) or e.__class__.__name__
+    if isinstance(e, (asyncio.TimeoutError, httpx.TimeoutException)):
+        s = "таймаут"
+    return s[:200]
+
+
+def _short_reason(r):
+    r = r or ""
+    for key, text in (("real certificate", "REALITY: сервер вернул настоящий сертификат"),
+                      ("context deadline exceeded", "таймаут проверки"),
+                      ("connection refused", "соединение отклонено"),
+                      ("i/o timeout", "таймаут соединения"),
+                      ("closed pipe", "соединение закрыто сервером"),
+                      ("EOF", "соединение оборвано (EOF)")):
+        if key in r:
+            return text
+    return r.split(">")[-1].strip()[:160]
+
+
+def _diagnose(logs, n):
+    if "real certificate" in logs:
+        return ("REALITY: сервер отвечает настоящим сертификатом сайта-маски. Почти всегда это неверные "
+                "publicKey / shortId / SNI, ЛИБО трафик этого сервера уже идёт через другой прокси "
+                "(двойное проксирование — проверьте, что мини-сервер исключён из XKeen на роутере).")
+    if "invalid connection" in logs or "reality" in logs and "failed" in logs:
+        return "Рукопожатие REALITY не проходит — проверьте publicKey, shortId, SNI и отпечаток (fingerprint)."
+    if "invalid user" in logs or "invalid request user" in logs:
+        return "Сервер не принимает пользователя — проверьте UUID / пароль и flow."
+    if "connection reset" in logs or "eof" in logs:
+        return ("Соединение сбрасывается после подключения — похоже на блокировку ТСПУ по протоколу/SNI "
+                "или на неверный flow/UUID.")
+    if "timeout" in logs or "deadline" in logs:
+        return "Сервер не отвечает на рукопожатие (таймаут) — возможна блокировка ТСПУ или сервер перегружен."
+    if "tls" in logs and "certificate" in logs:
+        return "Ошибка TLS-сертификата — проверьте SNI или включите allowInsecure для самоподписанного сертификата."
+    if n.get("security") == "reality":
+        return "TCP открыт, но через прокси трафик не идёт. Попробуйте сменить отпечаток (chrome ↔ firefox) и проверьте ключи."
+    return "TCP открыт, но через прокси трафик не идёт — смотрите журнал ниже."

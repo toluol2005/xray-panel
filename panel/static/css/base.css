@@ -1,0 +1,96 @@
+/* ---------- Сброс и база ---------- */
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; height: 100%; }
+html { background: var(--bg); color: var(--label); }
+body {
+  font-family: var(--font);
+  font-size: var(--fs);
+  line-height: 1.45;
+  background: var(--page-bg);
+  background-attachment: fixed;
+  color: var(--label);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv11", "ss01";
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+a { color: var(--accent); text-decoration: none; }
+h1, h2, h3, h4, p { margin: 0; }
+ul { margin: 0; padding: 0; list-style: none; }
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--fill3) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--fill3); border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- Каркас ---------- */
+#app { height: 100%; }
+.boot-screen { height: 100%; display: flex; align-items: center; justify-content: center; }
+
+.page {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+}
+.page-scroll {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  padding-bottom: calc(var(--tab-h) + var(--safe-b) + 24px);
+}
+.page-inner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 18px max(16px, var(--safe-r)) 0 max(16px, var(--safe-l));
+}
+
+/* Переходы между экранами — короткие и неназойливые */
+@keyframes page-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes page-in-r { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+@keyframes page-in-l { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
+.page.anim-fade { animation: page-fade .16s ease both; }
+.page.anim-push-in { animation: page-in-r .2s cubic-bezier(.2,.7,.2,1) both; }
+.page.anim-pop-in { animation: page-in-l .2s cubic-bezier(.2,.7,.2,1) both; }
+@media (prefers-reduced-motion: reduce) { .page { animation: none !important; } }
+
+/* ---------- Спиннер ---------- */
+.spinner {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--fill3);
+  border-top-color: var(--accent);
+  animation: spin .7s linear infinite;
+  display: inline-block; flex: none;
+}
+.spinner-lg { width: 30px; height: 30px; border-width: 3px; }
+.spinner-white { border-color: rgba(255,255,255,.35); border-top-color: #fff; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Скелетоны ---------- */
+.skeleton {
+  background: linear-gradient(90deg, var(--fill) 25%, var(--fill2) 37%, var(--fill) 63%);
+  background-size: 400% 100%;
+  animation: sk 1.3s ease infinite;
+  border-radius: var(--radius-sm);
+  height: 13px;
+}
+@keyframes sk { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+.skeleton-card { height: 76px; border-radius: var(--radius); margin: 0 0 12px; }
+
+/* ---------- Мелочи ---------- */
+.mono { font-family: var(--mono); font-size: var(--fs-sm); }
+.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.muted { color: var(--label2); }
+.center { text-align: center; }
+.hidden { display: none !important; }
+.nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grow { flex: 1; min-width: 0; }
+.c-red { color: var(--red); }
+.c-green { color: var(--green); }
+.c-orange { color: var(--orange); }
+.c-blue { color: var(--blue); }
+.c-gray { color: var(--gray); }

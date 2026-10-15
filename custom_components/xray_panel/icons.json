@@ -1,0 +1,46 @@
+{
+  "entity": {
+    "sensor": {
+      "group_active": {
+        "default": "mdi:routes"
+      },
+      "group_state": {
+        "default": "mdi:shield-check-outline"
+      },
+      "node_delay": {
+        "default": "mdi:timer-outline"
+      },
+      "last_event": {
+        "default": "mdi:message-text-outline"
+      },
+      "upload_rate": {
+        "default": "mdi:upload"
+      },
+      "download_rate": {
+        "default": "mdi:download"
+      },
+      "group_upload_rate": {
+        "default": "mdi:upload"
+      },
+      "group_download_rate": {
+        "default": "mdi:download"
+      },
+      "node_upload_rate": {
+        "default": "mdi:upload"
+      },
+      "node_download_rate": {
+        "default": "mdi:download"
+      }
+    },
+    "select": {
+      "group_node": {
+        "default": "mdi:server-network"
+      }
+    },
+    "button": {
+      "node_test": {
+        "default": "mdi:speedometer"
+      }
+    }
+  }
+}

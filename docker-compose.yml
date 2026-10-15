@@ -1,0 +1,10 @@
+services:
+  xray-panel:
+    build: .
+    image: xray-panel:local
+    container_name: xray-panel
+    restart: unless-stopped
+    # host-сеть: порты групп (7891, 7892, …) и панель (2017) слушаются прямо на хосте
+    network_mode: host
+    volumes:
+      - ./data:/data

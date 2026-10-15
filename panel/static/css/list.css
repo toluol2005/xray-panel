@@ -1,0 +1,136 @@
+/* ---------- Секции и карточки ---------- */
+.section { margin: 0 0 22px; min-width: 0; }
+.section-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: var(--fs-xs); font-weight: var(--head-weight);
+  color: var(--label2);
+  text-transform: var(--head-case);
+  letter-spacing: var(--head-ls);
+  padding: 0 2px 8px;
+}
+.section-foot {
+  font-size: var(--fs-sm); line-height: 1.45;
+  color: var(--label2);
+  padding: 8px 2px 0;
+  white-space: pre-line;
+}
+.section-foot b { font-weight: 600; color: var(--label); }
+.section-foot code, .row-sub code {
+  font-family: var(--mono); font-size: .92em;
+  background: var(--fill2); padding: 1px 5px; border-radius: 4px;
+}
+.card {
+  background: var(--card);
+  border: 1px var(--border-style) var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  position: relative;
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+}
+.card.plain { background: transparent; border: 0; box-shadow: none; }
+
+/* ---------- Строка ---------- */
+.row {
+  position: relative;
+  display: flex; align-items: center; gap: 12px;
+  min-height: 46px;
+  padding: 9px 14px;
+  background: transparent;
+  color: var(--label);
+  width: 100%;
+  text-align: left;
+  font-size: var(--fs);
+  border-bottom: 1px solid var(--sep);
+}
+.card > .row:last-child, .row.no-sep, .card > :last-child > .row:last-child { border-bottom: 0; }
+button.row, a.row, .row.tappable { cursor: pointer; transition: background .1s ease; }
+button.row:hover, a.row:hover, .row.tappable:hover { background: var(--card-press); }
+.row.disabled { opacity: .45; pointer-events: none; }
+.row.row-selected { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.row-icon {
+  width: 28px; height: 28px; flex: none;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--tile, var(--gray)) 15%, transparent);
+  color: var(--tile, var(--gray));
+  display: flex; align-items: center; justify-content: center;
+}
+.row-icon svg { width: 16px; height: 16px; display: block; }
+.row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.row-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-title.wrap { white-space: normal; }
+.row-sub {
+  font-size: var(--fs-sm); color: var(--label2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row-sub.wrap { white-space: normal; word-break: break-word; }
+.row-value {
+  color: var(--label2);
+  max-width: 55%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: right; flex: none;
+  font-family: var(--font-num); font-size: var(--fs-sm);
+}
+.row-aside { display: flex; align-items: center; gap: 8px; flex: none; }
+.chevron { width: 7px; height: 12px; flex: none; color: var(--label3); }
+.row .checkmark { width: 15px; height: 15px; color: var(--accent); flex: none; }
+.row-destructive { color: var(--red); justify-content: center; font-weight: 550; }
+.row-destructive:hover { background: color-mix(in srgb, var(--red) 8%, transparent) !important; }
+.row-action { color: var(--accent); font-weight: 550; }
+.row-center { justify-content: center; text-align: center; }
+
+/* ---------- Пустые состояния ---------- */
+.empty { padding: 40px 24px; text-align: center; color: var(--label2); font-size: var(--fs); line-height: 1.45; }
+.empty .empty-icon { width: 40px; height: 40px; margin: 0 auto 12px; color: var(--label3); }
+.empty .empty-icon svg { width: 100%; height: 100%; }
+.empty b { display: block; color: var(--label); font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+
+/* ---------- Карточки-сводки ---------- */
+.tile-card {
+  background: var(--card);
+  border: 1px var(--border-style) var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  margin: 0 0 12px;
+  padding: 14px 16px;
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+}
+.tile-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.tile-head .tile-title { font-size: 15px; font-weight: 600; flex: 1; min-width: 0; }
+.tile-grid { display: flex; gap: 10px 18px; flex-wrap: wrap; }
+.tile-metric { flex: 1 1 100px; min-width: 92px; }
+.tile-metric .tm-val { font-size: 18px; font-weight: 600; font-family: var(--font-num); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.tile-metric .tm-lab { font-size: var(--fs-xs); color: var(--label2); margin-top: 2px; text-transform: var(--head-case); letter-spacing: var(--head-ls); }
+
+/* ---------- Список перетаскивания ---------- */
+.sortable .row { touch-action: pan-y; }
+.sortable .row.drag-ghost {
+  z-index: 20;
+  background: var(--card);
+  box-shadow: var(--shadow-pop);
+  outline: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  position: relative;
+}
+.sortable .row.drag-shift { transition: transform .18s cubic-bezier(.3,.7,.2,1); }
+.drag-handle {
+  flex: none;
+  width: 26px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--label3);
+  touch-action: none;
+  cursor: grab;
+  border-radius: var(--radius-sm);
+}
+.drag-handle:hover { color: var(--label); background: var(--fill); }
+.drag-handle:active { cursor: grabbing; }
+.drag-handle svg { width: 16px; height: 16px; }
+.row-remove {
+  flex: none; width: 24px; height: 24px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--red) 14%, transparent); color: var(--red);
+  display: flex; align-items: center; justify-content: center;
+}
+.row-remove svg { width: 13px; height: 13px; }
+.row-remove:hover { background: var(--red); color: #fff; }

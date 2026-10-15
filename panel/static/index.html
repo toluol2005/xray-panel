@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<script>
+  // Применяем оформление до загрузки CSS, чтобы не мигало.
+  (function () {
+    var s = 'ops', t = 'auto';
+    try { s = localStorage.getItem('xp.style') || s; t = localStorage.getItem('xp.theme') || t; } catch (e) {}
+    // ?embed=1 — панель в iframe Home Assistant: «Авто» берёт тему HA из ?theme=
+    var q = new URLSearchParams(location.search), embed = q.get('embed') === '1', ht = q.get('theme');
+    var auto = embed && (ht === 'dark' || ht === 'light') ? ht === 'dark'
+      : !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+    var dark = t === 'dark' || (t !== 'light' && auto);
+    var r = document.documentElement;
+    r.setAttribute('data-style', s); r.setAttribute('data-theme', dark ? 'dark' : 'light');
+    if (embed) r.setAttribute('data-embed', '');
+  })();
+</script>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Xray Panel">
+<meta name="format-detection" content="telephone=no">
+<title>Xray Panel</title>
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<link rel="mask-icon" href="/static/icon.svg" color="#3b82f6">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div id="app">
+    <div class="boot-screen"><div class="spinner spinner-lg"></div></div>
+  </div>
+  <div id="overlays"></div>
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
