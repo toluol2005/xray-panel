@@ -5,7 +5,7 @@ import {
   toast, alertError, confirmAction, linesToList, listToLines, toInt,
 } from '../core.js';
 import { createPageEl, appearancePicker } from '../shell.js';
-import { STYLE_HINTS, getStyle, EMBED } from '../theme.js';
+import { STYLE_HINTS, getStyle } from '../theme.js';
 import { tspuToolSection, xraySection, backupSection, aboutSection } from './settings-tools.js';
 
 const SYNTAX_HELP = 'Форматы строк xray: example.com (подстрока), domain:example.com, ' +
@@ -105,7 +105,7 @@ function probeSection(ctx) {
 /* ---------------- Оформление ---------------- */
 
 function appearanceSection(reg) {
-  const autoHint = EMBED ? '\n«Авто» следует теме Home Assistant.' : '\n«Авто» следует настройкам системы.';
+  const autoHint = '\n«Авто» следует настройкам системы.';
   const foot = h('div.section-foot', { text: STYLE_HINTS[getStyle()] + autoHint });
   const picker = appearancePicker({ onChange: () => { foot.textContent = STYLE_HINTS[getStyle()] + autoHint; } });
   picker.classList.add('wide');

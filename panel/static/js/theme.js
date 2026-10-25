@@ -16,14 +16,6 @@ export const THEME_LABELS = { auto: 'Авто', light: 'Светлая', dark: '
 
 const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
-// Встроенный режим (?embed=1): панель открыта в iframe внутри Home Assistant.
-// Тогда «Авто» следует теме HA — она приходит в ?theme= и затем через postMessage.
-const params = new URLSearchParams(location.search);
-export const EMBED = params.get('embed') === '1';
-let hostTheme = EMBED ? hostThemeOf(params.get('theme')) : null;
-
-function hostThemeOf(v) { return v === 'dark' || v === 'light' ? v : null; }
-
 function read(key, def) {
   try { return localStorage.getItem(key) || def; } catch (e) { return def; }
 }
@@ -59,7 +51,6 @@ export function isDark() {
   const t = getTheme();
   if (t === 'dark') return true;
   if (t === 'light') return false;
-  if (hostTheme) return hostTheme === 'dark';
   return !!(mq && mq.matches);
 }
 
@@ -83,16 +74,7 @@ export function applyTheme() {
 }
 
 if (mq) {
-  const onChange = () => { if (getTheme() === 'auto' && !hostTheme) applyTheme(); };
+  const onChange = () => { if (getTheme() === 'auto') applyTheme(); };
   if (mq.addEventListener) mq.addEventListener('change', onChange);
   else if (mq.addListener) mq.addListener(onChange);
-}
-
-if (EMBED) {
-  window.addEventListener('message', (e) => {
-    const d = e.data;
-    if (e.source !== window.parent || !d || d.type !== 'xp-host-theme') return;
-    hostTheme = hostThemeOf(d.theme);
-    if (getTheme() === 'auto') applyTheme();
-  });
 }

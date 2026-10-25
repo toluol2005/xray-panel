@@ -2,4 +2,3 @@ data
 .git
 __pycache__
 seed-state.json
-custom_components

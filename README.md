@@ -1,9 +1,8 @@
 # Xray Panel
 
-Веб-панель для [Xray-core](https://github.com/XTLS/Xray-core) с интеграцией для Home Assistant.
+Веб-панель для [Xray-core](https://github.com/XTLS/Xray-core).
 
-*A self-hosted web panel for Xray-core (proxy groups with priority failover, node management, traffic stats)
-plus a Home Assistant custom integration that embeds the panel into the HA sidebar and exposes groups/nodes as entities.
+*A self-hosted web panel for Xray-core (proxy groups with priority failover, node management, traffic stats).
 The UI is in Russian.*
 
 ## Возможности
@@ -18,13 +17,6 @@ The UI is in Russian.*
 - трафик по группам и узлам, активные соединения, журнал событий;
 - проверка адреса в реестре РКН / ТСПУ (через cheburcheck.ru);
 - 4 стиля оформления (ops, clean, glass, term), тема светлая / тёмная / авто, адаптивная вёрстка под телефон.
-
-**Интеграция Home Assistant** (`custom_components/xray_panel`):
-
-- пункт **VPN** в боковом меню HA — панель во встроенном режиме, тема синхронизируется с HA;
-- для каждой группы: выбор узла (Авто / конкретный узел / Напрямую), активный узел, состояние, скорость;
-- для каждого узла: доступность, задержка, трафик, кнопка проверки;
-- общие: Xray запущен, аптайм, скорость и объём трафика, последнее событие, кнопка перезапуска Xray.
 
 ## Установка панели
 
@@ -70,34 +62,6 @@ users:
 pip install -r requirements.txt
 PANEL_CONFIG=./data/panel.yaml XRAY_BIN=/usr/local/bin/xray python -m panel
 ```
-
-## Интеграция Home Assistant
-
-Нужен Home Assistant 2025.1 или новее. Панель должна быть доступна и самому HA, и браузеру,
-в котором вы открываете HA.
-
-### Через HACS
-
-1. HACS → ⋮ → **Пользовательские репозитории** → `https://github.com/lor08/xray-panel`, тип **Интеграция**.
-2. Найдите **Xray Panel**, установите, перезапустите Home Assistant.
-3. **Настройки → Устройства и службы → Добавить интеграцию → Xray Panel**.
-
-### Вручную
-
-Скопируйте `custom_components/xray_panel` в `<config>/custom_components/`, перезапустите HA
-и добавьте интеграцию так же, как в шаге 3.
-
-### Настройка
-
-- **Адрес панели**: например `http://192.168.1.10:2017`. По этому адресу HA опрашивает API, и по нему же
-  браузер открывает панель внутри HA, поэтому `localhost` не подойдёт.
-- **Логин / пароль** нужны, только если в панели включён вход.
-- В параметрах интеграции можно сменить название пункта меню и показывать его не только администраторам.
-
-Если HA открыт по HTTPS, а панель по HTTP, браузер заблокирует встроенную панель (mixed content).
-В этом случае откройте панель тоже по HTTPS, например через обратный прокси.
-
-Встроенный режим доступен и без HA: `http://<хост>:2017/?embed=1&theme=dark`.
 
 ## API
 

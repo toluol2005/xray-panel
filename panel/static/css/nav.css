@@ -198,22 +198,3 @@
 }
 .appearance.wide .ap-style { font-size: var(--fs-sm); }
 .appearance.wide .ap-theme { height: 32px; font-size: var(--fs-sm); }
-
-/* ---------- Встроенный режим (?embed=1, iframe в Home Assistant) ----------
-   Слева уже есть меню HA, поэтому на десктопе разделы — строкой вкладок сверху,
-   без логотипа и переключателя оформления (он остаётся в «Настройках»). */
-@media (min-width: 900px) {
-  [data-embed] .shell { flex-direction: column; }
-  [data-embed] .sidebar {
-    width: auto; flex-direction: row; align-items: center;
-    padding: 8px 0; overflow: visible;
-    border-right: 0; border-bottom: 1px solid var(--border);
-  }
-  [data-embed] .sidebar-brand,
-  [data-embed] .sidebar-foot { display: none; }
-  [data-embed] .sidebar-nav {
-    flex-direction: row; flex-wrap: wrap; gap: 4px;
-    width: 100%; max-width: var(--maxw); margin: 0 auto; padding: 0 28px;
-  }
-  [data-embed] .sidebar .tab { height: 32px; }
-}

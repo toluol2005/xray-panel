@@ -9,14 +9,9 @@
   (function () {
     var s = 'ops', t = 'auto';
     try { s = localStorage.getItem('xp.style') || s; t = localStorage.getItem('xp.theme') || t; } catch (e) {}
-    // ?embed=1 — панель в iframe Home Assistant: «Авто» берёт тему HA из ?theme=
-    var q = new URLSearchParams(location.search), embed = q.get('embed') === '1', ht = q.get('theme');
-    var auto = embed && (ht === 'dark' || ht === 'light') ? ht === 'dark'
-      : !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
-    var dark = t === 'dark' || (t !== 'light' && auto);
+    var dark = t === 'dark' || (t !== 'light' && !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches));
     var r = document.documentElement;
     r.setAttribute('data-style', s); r.setAttribute('data-theme', dark ? 'dark' : 'light');
-    if (embed) r.setAttribute('data-embed', '');
   })();
 </script>
 <meta name="apple-mobile-web-app-capable" content="yes">
