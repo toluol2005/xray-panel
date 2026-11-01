@@ -26,7 +26,7 @@ The UI is in Russian.*
 Нужен Docker. Образ собирается сам и скачивает Xray-core нужной архитектуры (amd64, arm64, armv7).
 
 ```sh
-git clone https://github.com/lor08/xray-panel.git
+git clone https://github.com/toluol2005/xray-panel.git
 cd xray-panel
 docker compose up -d --build
 ```
