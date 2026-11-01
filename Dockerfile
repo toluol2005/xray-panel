@@ -1,6 +1,6 @@
 FROM python:3.12-alpine
 
-ARG XRAY_VERSION=26.10.10
+ARG XRAY_VERSION=26.10.31
 ARG TARGETARCH
 
 RUN apk add --no-cache ca-certificates tzdata curl unzip \

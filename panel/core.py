@@ -9,12 +9,23 @@ import time
 import httpx
 
 from . import links, xraygen
-from .store import Store, ValidationError
+from .store import Store, ValidationError, clean_node
 from .xray import Xray
 
 SAMPLE = 5            # шаг истории трафика, с
 HISTORY = 720         # точек истории (1 час)
 CHEBURCHECK = "https://cheburcheck.ru/api/v1/check"
+
+# поля узла, которые обновляются из подписки при сверке (id, enabled, note, sub, ключи — не трогаем)
+_SUB_SYNC = ("name", "network", "security", "sni", "fingerprint", "alpn", "allowInsecure",
+             "publicKey", "shortId", "spiderX", "path", "host", "serviceName", "mode",
+             "encryption", "flow", "alterId", "method")
+
+
+def _sub_key(n):
+    """Ключ узла для сверки подписки: протокол + адрес + порт + секрет."""
+    return (n["protocol"], n["address"], int(n["port"]),
+            n.get("uuid") or n.get("password") or n.get("username") or "")
 
 
 class ApplyError(Exception):
@@ -421,19 +432,29 @@ class Panel:
                 self.event("warn", f"ТСПУ-проверка: {e}")
             await asyncio.sleep(self.store.state["settings"]["tspuInterval"] * 60)
 
-    # --- импорт --------------------------------------------------------------
+    # --- импорт / подписки -----------------------------------------------------
+    async def _fetch_sub(self, url):
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
+                                         headers={"User-Agent": "v2rayN/7.0"}) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                return r.text
+        except Exception as e:
+            raise ApplyError("Не удалось скачать подписку", str(e))
+
     async def import_links(self, text, gid=None):
         text = text.strip()
         errors = []
         if text.startswith(("http://", "https://")) and "\n" not in text:
-            try:
-                async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
-                                             headers={"User-Agent": "v2rayN/7.0"}) as c:
-                    r = await c.get(text)
-                    r.raise_for_status()
-                    text = r.text
-            except Exception as e:
-                raise ApplyError("Не удалось скачать подписку", str(e))
+            existing = self.store.subscription_by_url(text)
+            if existing:
+                # та же ссылка — это обновление существующей подписки
+                if gid and gid != existing["group"]:
+                    await self.apply(lambda: self.store.update_subscription(existing["id"], {"group": gid}),
+                                     restart=False)
+                return await self.refresh_subscription(existing["id"])
+            return await self._import_subscription(text, gid)
         parsed, errors = links.parse_text(text)
         if not parsed:
             raise ApplyError("Не найдено ни одной ссылки", "\n".join(errors))
@@ -450,6 +471,83 @@ class Panel:
                 g["nodes"] += [n["id"] for n in added]
         await self.apply(mutate)
         return {"added": added, "errors": errors}
+
+    async def _import_subscription(self, url, gid):
+        text = await self._fetch_sub(url)
+        parsed, errors = links.parse_text(text)
+        if not parsed:
+            raise ApplyError("В подписке не найдено ни одной ссылки", "\n".join(errors))
+        added = []
+        sub = [None]
+
+        def mutate():
+            sub[0] = self.store.add_subscription({"url": url, "group": gid or ""})
+            s = sub[0]
+            for p in parsed:
+                try:
+                    added.append(self.store.add_node({**p, "sub": s["id"]}))
+                except ValidationError as e:
+                    errors.append(f"{p.get('name') or p.get('address')}: {e}")
+            g = self.store.group(s["group"])
+            if g:
+                g["nodes"] += [n["id"] for n in added]
+            s["updatedAt"] = int(time.time())
+        await self.apply(mutate)
+        self.event("info", f"Подписка «{sub[0]['name']}»: добавлено узлов {len(added)}")
+        return {"added": added, "errors": errors, "subscription": sub[0]}
+
+    async def refresh_subscription(self, sid):
+        """Перекачать подписку и сверить узлы: обновить, добавить новые, удалить исчезнувшие."""
+        sub = self.store.subscription(sid)
+        if not sub:
+            raise ApplyError("Подписка не найдена")
+        text = await self._fetch_sub(sub["url"])
+        parsed, errors = links.parse_text(text)
+        desired = {}
+        for p in parsed:
+            try:
+                clean_node(p, "tmp")          # проверка корректности, p не меняется
+            except ValidationError as e:
+                errors.append(f"{p.get('name') or p.get('address')}: {e}")
+                continue
+            desired[_sub_key(p)] = p
+        added, removed = [], []
+        updated = [0]
+
+        def mutate():
+            for n in [x for x in self.store.nodes if x.get("sub") == sid]:
+                p = desired.pop(_sub_key(n), None)
+                if p is None:
+                    removed.append(n["name"])
+                    self.store.delete_node(n["id"])
+                else:
+                    self.store.update_node(n["id"], {f: p.get(f) for f in _SUB_SYNC})
+                    updated[0] += 1
+            for p in desired.values():
+                try:
+                    added.append(self.store.add_node({**p, "sub": sid}))
+                except ValidationError as e:
+                    errors.append(f"{p.get('name') or p.get('address')}: {e}")
+            g = self.store.group(sub["group"])
+            if g:
+                g["nodes"] += [n["id"] for n in added]
+            self.store.update_subscription(sid, {"updatedAt": int(time.time())})
+        await self.apply(mutate)
+        msg = f"Подписка «{sub['name']}»: добавлено {len(added)}, обновлено {updated[0]}, удалено {len(removed)}"
+        self.event("warn" if errors else "info", msg + (f"; не распознано строк: {len(errors)}" if errors else ""))
+        return {"added": added, "updated": updated[0], "removed": len(removed),
+                "errors": errors, "subscription": self.store.subscription(sid)}
+
+    async def delete_subscription(self, sid, with_nodes=False):
+        sub = self.store.subscription(sid)
+        if not sub:
+            raise ApplyError("Подписка не найдена")
+        if with_nodes:
+            await self.apply(lambda: self.store.delete_subscription(sid, True))
+        else:
+            self.store.delete_subscription(sid, False)
+            self.store.save()
+        self.event("info", f"Подписка «{sub['name']}» удалена" + (" вместе с узлами" if with_nodes else ""))
 
     # --- диагностика узла ------------------------------------------------------
     async def test_node(self, nid):

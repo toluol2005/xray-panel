@@ -191,6 +191,18 @@ async def import_nodes(request: Request):
     return await panel.import_links(body.get("text", ""), body.get("group"))
 
 
+# --- подписки ------------------------------------------------------------------
+@app.post("/api/subscriptions/{sid}/refresh")
+async def subscription_refresh(sid: str):
+    return await panel.refresh_subscription(sid)
+
+
+@app.delete("/api/subscriptions/{sid}")
+async def subscription_delete(sid: str, nodes: bool = False):
+    await panel.delete_subscription(sid, nodes)
+    return {"ok": True}
+
+
 @app.get("/api/nodes/{nid}/link")
 async def node_link(nid: str):
     return {"link": links.build_link(_node_or_404(nid))}

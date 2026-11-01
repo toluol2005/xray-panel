@@ -20,9 +20,18 @@ Node (узел / «конфиг»):
   "alpn": "", "allowInsecure": false,
   "publicKey": "", "shortId": "", "spiderX": "",
   "path": "", "host": "", "serviceName": "", "mode": "",
-  "raw": null }
+  "raw": null,
+  "sub": null }
 ```
 `raw` — необязательный готовый JSON-объект outbound xray (если задан, остальные поля игнорируются; tag подставит сервер).
+`sub` — id подписки, из которой пришёл узел (null у добавленных вручную).
+
+Subscription (подписка):
+```json
+{ "id": "s8c1d44", "name": "sub3.example.com", "url": "https://sub3.example.com/xxxx",
+  "group": "g-main",          // группа, куда добавляются новые узлы ("" — никуда)
+  "updatedAt": 1791966509 }   // 0 = ещё не обновлялась
+```
 
 Group:
 ```json
@@ -76,14 +85,17 @@ Settings:
 `alive:null` — ещё не проверялся.
 
 Полное состояние
-- `GET /api/state` → `{nodes:[Node], groups:[Group], routing:Routing, settings:Settings}`
+- `GET /api/state` → `{nodes:[Node], groups:[Group], subscriptions:[Subscription], routing:Routing, settings:Settings}`
 
 Узлы (изменения применяются сразу: генерация конфига → `xray -test` → перезапуск; при ошибке 400 с текстом)
 - `POST   /api/nodes` Node(без id) → Node
 - `PUT    /api/nodes/{id}` Node → Node
 - `DELETE /api/nodes/{id}` → `{ok}` (удаляется и из групп)
 - `POST   /api/nodes/reorder` `{ids:[...]}` → `{ok}`  (порядок в общем списке)
-- `POST   /api/nodes/import` `{text}` — ссылки vless:// vmess:// trojan:// ss:// (по одной в строке) ИЛИ URL подписки, `group` (необязательно, id группы куда добавить) → `{added:[Node], errors:["..."]}`
+- `POST   /api/nodes/import` `{text}` — ссылки vless:// vmess:// trojan:// ss:// (по одной в строке) ИЛИ URL подписки, `group` (необязательно, id группы куда добавить).
+  Если `text` — URL подписки: первая вставка создаёт подписку → `{added:[Node], errors, subscription:Subscription}`;
+  повторная вставка того же URL (или `POST /api/subscriptions/{id}/refresh`) обновляет её → `{added, updated, removed, errors, subscription}`.
+  Для обычных ссылок → `{added:[Node], errors:["..."]}`
 - `GET    /api/nodes/{id}/link` → `{link:"vless://..."}`
 - `POST   /api/nodes/{id}/test` → диагностика узла (5–20 с):
 ```json
@@ -102,6 +114,13 @@ Settings:
 - `DELETE /api/groups/{id}` → `{ok}`
 - `POST   /api/groups/reorder` `{ids:[...]}` → `{ok}`
 - `POST   /api/groups/{id}/pin` `{node: "<id>"|"direct"|null}` → `{ok}` (null = авто)
+
+Подписки
+- `POST   /api/subscriptions/{id}/refresh` → скачать подписку заново и сверить узлы
+  (узлы сопоставляются по протоколу+адресу+порту+секрету: изменившиеся обновляются, новые добавляются
+  в `group` подписки, исчезнувшие удаляются; переключатели `enabled` и заметки пользователей сохраняются)
+  → `{added:[Node], updated:int, removed:int, errors:["..."], subscription:Subscription}`
+- `DELETE /api/subscriptions/{id}?nodes=true|false` → `{ok}` (nodes=true — удалить и все узлы подписки)
 
 Маршрутизация / настройки
 - `PUT /api/routing` Routing → Routing

@@ -1,8 +1,9 @@
-"""Состояние панели: узлы, группы, маршрутизация, настройки (data/state.json)."""
+"""Состояние панели: узлы, группы, подписки, маршрутизация, настройки (data/state.json)."""
 import copy
 import json
 import os
 import secrets
+from urllib.parse import urlsplit
 
 NODE_DEFAULTS = {
     "name": "", "enabled": True, "note": "",
@@ -14,6 +15,7 @@ NODE_DEFAULTS = {
     "publicKey": "", "shortId": "", "spiderX": "",
     "path": "", "host": "", "serviceName": "", "mode": "",
     "raw": None,
+    "sub": None,   # id подписки, из которой пришёл узел
 }
 
 GROUP_DEFAULTS = {
@@ -21,6 +23,8 @@ GROUP_DEFAULTS = {
     "nodes": [], "strategy": "priority", "fallback": "direct", "pinned": None,
     "routing": "geo", "username": "", "password": "",
 }
+
+SUB_DEFAULTS = {"name": "", "url": "", "group": "", "updatedAt": 0}
 
 ROUTING_DEFAULTS = {
     "directDomains": [], "proxyDomains": [], "blockDomains": [],
@@ -109,6 +113,7 @@ def clean_node(data, nid):
             raise ValidationError("Для Reality нужен publicKey")
     n["enabled"] = bool(n["enabled"])
     n["allowInsecure"] = bool(n["allowInsecure"])
+    n["sub"] = str(n["sub"]) if n["sub"] else None
     return n
 
 
@@ -138,6 +143,23 @@ def clean_group(data, gid, node_ids):
     g["enabled"] = bool(g["enabled"])
     g["udp"] = bool(g["udp"])
     return g
+
+
+def clean_subscription(data, sid, group_ids):
+    s = _merge(SUB_DEFAULTS, data)
+    s["id"] = sid
+    s["url"] = str(s["url"]).strip()
+    if not s["url"].startswith(("http://", "https://")):
+        raise ValidationError("URL подписки должен начинаться с http:// или https://")
+    s["name"] = str(s["name"]).strip() or urlsplit(s["url"]).netloc or sid
+    s["group"] = str(s["group"] or "")
+    if s["group"] and s["group"] not in group_ids:
+        s["group"] = ""
+    try:
+        s["updatedAt"] = int(s["updatedAt"] or 0)
+    except (TypeError, ValueError):
+        s["updatedAt"] = 0
+    return s
 
 
 def clean_routing(data):
@@ -172,8 +194,8 @@ def clean_settings(data):
 class Store:
     def __init__(self, data_dir):
         self.path = os.path.join(data_dir, "state.json")
-        self.state = {"nodes": [], "groups": [], "routing": clean_routing({}),
-                      "settings": clean_settings({})}
+        self.state = {"nodes": [], "groups": [], "subscriptions": [],
+                      "routing": clean_routing({}), "settings": clean_settings({})}
         if os.path.exists(self.path):
             with open(self.path, encoding="utf-8") as f:
                 self.replace(json.load(f), save=False)
@@ -194,6 +216,16 @@ class Store:
 
     def group(self, gid):
         return next((g for g in self.groups if g["id"] == gid), None)
+
+    @property
+    def subscriptions(self):
+        return self.state["subscriptions"]
+
+    def subscription(self, sid):
+        return next((s for s in self.subscriptions if s["id"] == sid), None)
+
+    def subscription_by_url(self, url):
+        return next((s for s in self.subscriptions if s["url"] == url), None)
 
     def snapshot(self):
         return copy.deepcopy(self.state)
@@ -223,7 +255,12 @@ class Store:
             ports.add(g["port"])
             groups.append(g)
             gids.add(gid)
-        self.state = {"nodes": nodes, "groups": groups,
+        subs, sids = [], set()
+        for raw in data.get("subscriptions", []):
+            sid = raw.get("id") or new_id("s", sids)
+            subs.append(clean_subscription(raw, sid, gids))
+            sids.add(sid)
+        self.state = {"nodes": nodes, "groups": groups, "subscriptions": subs,
                       "routing": clean_routing(data.get("routing", {})),
                       "settings": clean_settings(data.get("settings", {}))}
         if save:
@@ -249,6 +286,29 @@ class Store:
             g["nodes"] = [x for x in g["nodes"] if x != nid]
             if g["pinned"] == nid:
                 g["pinned"] = None
+
+    # --- подписки ------------------------------------------------------------
+    def add_subscription(self, data):
+        s = clean_subscription(data, data.get("id") or new_id("s", {x["id"] for x in self.subscriptions}),
+                               {g["id"] for g in self.groups})
+        if self.subscription_by_url(s["url"]):
+            raise ValidationError("Эта подписка уже добавлена")
+        self.subscriptions.append(s)
+        return s
+
+    def update_subscription(self, sid, data):
+        old = self.subscription(sid)
+        if not old:
+            raise KeyError(sid)
+        s = clean_subscription({**old, **data}, sid, {g["id"] for g in self.groups})
+        self.subscriptions[self.subscriptions.index(old)] = s
+        return s
+
+    def delete_subscription(self, sid, with_nodes=False):
+        self.state["subscriptions"] = [s for s in self.subscriptions if s["id"] != sid]
+        if with_nodes:
+            for n in [x for x in self.nodes if x.get("sub") == sid]:
+                self.delete_node(n["id"])
 
     def reorder(self, key, ids):
         items = self.state[key]
@@ -279,3 +339,6 @@ class Store:
 
     def delete_group(self, gid):
         self.state["groups"] = [g for g in self.groups if g["id"] != gid]
+        for s in self.subscriptions:
+            if s["group"] == gid:
+                s["group"] = ""
