@@ -28,7 +28,7 @@ Node (узел / «конфиг»):
 
 Subscription (подписка):
 ```json
-{ "id": "s8c1d44", "name": "sub3.example.com", "url": "https://sub3.example.com/xxxx",
+{ "id": "s8c1d44", "name": "sub.example.com", "url": "https://sub.example.com/xxxx",
   "group": "g-main",          // группа, куда добавляются новые узлы ("" — никуда)
   "updatedAt": 1791966509 }   // 0 = ещё не обновлялась
 ```
@@ -56,7 +56,7 @@ Settings:
 ```json
 { "probeURL": "https://www.gstatic.com/generate_204", "probeInterval": 30,
   "logLevel": "warning|info|debug|error", "dns": ["https://1.1.1.1/dns-query", "8.8.8.8"],
-  "tspuInterval": 360, "subProxyHosts": ["sub3.example.com"],
+  "tspuInterval": 360, "subProxyHosts": ["sub.example.com"],
   "geoipURL": "...", "geositeURL": "..." }
 ```
 `subProxyHosts` — хосты, подписки с которых качаются только через VPN-узлы панели

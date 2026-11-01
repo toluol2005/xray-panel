@@ -105,7 +105,7 @@ function probeSection(ctx) {
 /* ---------------- Загрузка подписок ---------------- */
 
 function subSection(ctx) {
-  const ta = textArea(listToLines(ctx.settings.subProxyHosts || []), 'sub3.example.com', 3);
+  const ta = textArea(listToLines(ctx.settings.subProxyHosts || []), 'sub.example.com', 3);
   const saveBtn = h('button.btn', { type: 'button', text: 'Сохранить' });
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;

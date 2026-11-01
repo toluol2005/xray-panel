@@ -86,7 +86,7 @@ def _sub_host(url):
 
 
 def _host_in_list(host, hosts):
-    """host совпадает с записью или является её поддоменом (example.com покрывает sub3.example.com)."""
+    """host совпадает с записью или является её поддоменом (example.com покрывает sub.example.com)."""
     return any(host == h or host.endswith("." + h) for h in hosts)
 
 
