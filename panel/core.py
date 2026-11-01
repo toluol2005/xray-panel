@@ -30,10 +30,12 @@ def _sub_key(n):
 
 def _sub_net_hint(e):
     """Человеческое объяснение сетевой ошибки при скачивании подписки."""
-    s = (str(e) or e.__class__.__name__).lower()
+    s = (str(e) or repr(e) or "").lower().replace("_", " ")
     if isinstance(e, httpx.TimeoutException) or "timed out" in s:
-        return "сервер подписки не ответил (таймаут; возможна блокировка IPv6 — попробуйте ещё раз)"
-    if "certificate" in s or "ssl" in s:
+        return "сервер подписки не ответил (таймаут)"
+    if "unexpected eof" in s or "eof while reading" in s or "eof occurred" in s:
+        return "TLS-соединение обрывается при рукопожатии (похоже на блокировку ТСПУ)"
+    if "certificate verify" in s or ("certificate" in s and "eof" not in s):
         return "ошибка TLS-сертификата сервера"
     if ("name or service not known" in s or "nodename" in s or "no address associated" in s
             or "name resolution" in s):
@@ -43,7 +45,9 @@ def _sub_net_hint(e):
     if "unreachable" in s:
         return "сеть недостижима"
     if "reset" in s:
-        return "соединение сброшено (возможно, блокировка ТСПУ)"
+        return "соединение сброшено"
+    if "connect" in s:
+        return "не удалось установить соединение"
     return (str(e) or e.__class__.__name__)[:200]
 
 
@@ -478,8 +482,8 @@ class Panel:
 
     # --- импорт / подписки -----------------------------------------------------
     async def _fetch_sub(self, url):
-        """Скачать подписку. При сетевом сбое — повтор только через IPv4 (на хостах
-        с «битым» IPv6 curl проходит, а Python-клиент виснет на AAAA-адресах)."""
+        """Скачать подписку: напрямую (с повтором через IPv4), при сбое — через локальные
+        http-прокси узлов (зарубежный выход обходит обрыв TLS на своем провайдере)."""
         last = None
         for v4_only in (False, True):
             try:
@@ -491,7 +495,13 @@ class Panel:
             except Exception as e:
                 last = e
         else:
-            raise ApplyError("Не удалось скачать подписку: " + _sub_net_hint(last), str(last))
+            direct = _sub_net_hint(last)
+            r, last = await self._fetch_sub_via_nodes(url, last)
+            if r is None:
+                msg = "Не удалось скачать подписку: " + direct
+                if last is not None:
+                    msg += ". Через прокси узлов тоже не вышло (" + _sub_net_hint(last) + ")"
+                raise ApplyError(msg, str(last) or repr(last))
         if r.status_code >= 400:
             raise ApplyError(f"Подписка недоступна: сервер вернул HTTP {r.status_code}",
                              _sub_text_hint(r.text) + " Проверьте ссылку и срок действия подписки.")
@@ -499,6 +509,25 @@ class Panel:
         if _sub_body_kind(text):
             raise ApplyError("Сервер подписки отдал не подписку", _sub_text_hint(text))
         return text
+
+    async def _fetch_sub_via_nodes(self, url, last):
+        """Резерв: скачать подписку через http-прокси тестовых inbound'ов узлов
+        (127.0.0.1:20100+, живут в том же xray). Сначала пробуем живые узлы."""
+        nodes = [self.store.node(nid) for nid in self.meta.get("test_ports", {})]
+        nodes = [n for n in nodes if n and n["enabled"]]
+        nodes.sort(key=lambda n: not bool((self.observatory.get(n["id"]) or {}).get("alive")))
+        for n in nodes[:4]:
+            port = self.meta["test_ports"][n["id"]]
+            try:
+                async with httpx.AsyncClient(trust_env=False, proxy=f"http://127.0.0.1:{port}",
+                                             timeout=10, follow_redirects=True,
+                                             headers={"User-Agent": "v2rayN/7.0"}) as c:
+                    r = await c.get(url)
+                self.event("info", f"Подписка скачана через прокси узла «{n['name']}»")
+                return r, last
+            except Exception as e:
+                last = e
+        return None, last
 
     async def import_links(self, text, gid=None):
         text = text.strip()
