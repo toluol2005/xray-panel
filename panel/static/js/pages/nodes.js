@@ -60,6 +60,7 @@ function importSummary(res) {
   const parts = [];
   if (res.subscription) {
     if (res.updated) parts.push('обновлено: ' + res.updated);
+    if (res.adopted) parts.push('привязано: ' + res.adopted);
     if (added) parts.push('добавлено: ' + added);
     if (res.removed) parts.push('удалено: ' + res.removed);
   } else if (added) {

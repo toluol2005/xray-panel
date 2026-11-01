@@ -56,8 +56,12 @@ Settings:
 ```json
 { "probeURL": "https://www.gstatic.com/generate_204", "probeInterval": 30,
   "logLevel": "warning|info|debug|error", "dns": ["https://1.1.1.1/dns-query", "8.8.8.8"],
-  "tspuInterval": 360, "geoipURL": "...", "geositeURL": "..." }
+  "tspuInterval": 360, "subProxyHosts": ["sub3.example.com"],
+  "geoipURL": "...", "geositeURL": "..." }
 ```
+`subProxyHosts` — хосты, подписки с которых качаются только через VPN-узлы панели
+(«всегда через прокси»). Панель добавляет хост сама, если прямое скачивание обрывается
+(ТСПУ/Cloudflare); запись — домен, IP разрешается заново при каждом обновлении.
 
 ## Эндпоинты
 
@@ -93,9 +97,10 @@ Settings:
 - `DELETE /api/nodes/{id}` → `{ok}` (удаляется и из групп)
 - `POST   /api/nodes/reorder` `{ids:[...]}` → `{ok}`  (порядок в общем списке)
 - `POST   /api/nodes/import` `{text}` — ссылки vless:// vmess:// trojan:// ss:// (по одной в строке) ИЛИ URL подписки, `group` (необязательно, id группы куда добавить).
-  Если `text` — URL подписки: первая вставка создаёт подписку → `{added:[Node], errors, subscription:Subscription}`;
-  повторная вставка того же URL (или `POST /api/subscriptions/{id}/refresh`) обновляет её → `{added, updated, removed, errors, subscription}`.
-  Для обычных ссылок → `{added:[Node], errors:["..."]}`
+  Если `text` — URL подписки: первая вставка создаёт подписку → `{added:[Node], adopted:int, errors, subscription:Subscription}`;
+  повторная вставка того же URL (или `POST /api/subscriptions/{id}/refresh`) обновляет её → `{added, updated, adopted, removed, errors, subscription}`.
+  Узлы, добавленные раньше вручную с теми же реквизитами (протокол+адрес+порт+секрет), привязываются к подписке
+  (`adopted`, поле `sub` узла), а не дублируются. Для обычных ссылок → `{added:[Node], errors:["..."]}`
 - `GET    /api/nodes/{id}/link` → `{link:"vless://..."}`
 - `POST   /api/nodes/{id}/test` → диагностика узла (5–20 с):
 ```json
@@ -117,10 +122,14 @@ Settings:
 
 Подписки
 - `POST   /api/subscriptions/{id}/refresh` → скачать подписку заново и сверить узлы
-  (узлы сопоставляются по протоколу+адресу+порту+секрету: изменившиеся обновляются, новые добавляются
-  в `group` подписки, исчезнувшие удаляются; переключатели `enabled` и заметки пользователей сохраняются)
-  → `{added:[Node], updated:int, removed:int, errors:["..."], subscription:Subscription}`
+  (узлы сопоставляются по протоколу+адресу+порту+секрету: свои обновляются, ручные с теми же реквизитами
+  привязываются к подписке, новые добавляются в `group` подписки, исчезнувшие удаляются;
+  переключатели `enabled` и заметки пользователей сохраняются)
+  → `{added:[Node], updated:int, adopted:int, removed:int, errors:["..."], subscription:Subscription}`
 - `DELETE /api/subscriptions/{id}?nodes=true|false` → `{ok}` (nodes=true — удалить и все узлы подписки)
+- Скачивание подписки: напрямую (при сбое — повтор через IPv4), затем резерв через http-прокси
+  тестовых inbound'ов узлов (127.0.0.1:20100+). Если и это не спасло при прямом скачивании —
+  хост подписки добавляется в `settings.subProxyHosts` и дальше качается сразу через узлы.
 
 Маршрутизация / настройки
 - `PUT /api/routing` Routing → Routing

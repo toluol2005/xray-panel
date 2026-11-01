@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -74,6 +75,19 @@ def _sub_text_hint(text):
     if kind:
         return f"{kind}. Начало ответа: «{head}»"
     return f"Начало ответа сервера: «{head}»"
+
+
+def _sub_host(url):
+    """Имя хоста из ссылки подписки (нижний регистр) или None."""
+    try:
+        return (urlsplit(url).hostname or "").lower() or None
+    except ValueError:
+        return None
+
+
+def _host_in_list(host, hosts):
+    """host совпадает с записью или является её поддоменом (example.com покрывает sub3.example.com)."""
+    return any(host == h or host.endswith("." + h) for h in hosts)
 
 
 class ApplyError(Exception):
@@ -483,32 +497,58 @@ class Panel:
     # --- импорт / подписки -----------------------------------------------------
     async def _fetch_sub(self, url):
         """Скачать подписку: напрямую (с повтором через IPv4), при сбое — через локальные
-        http-прокси узлов (зарубежный выход обходит обрыв TLS на своем провайдере)."""
+        http-прокси узлов. Хосты из «всегда через прокси» сразу качаются через узлы."""
+        host = _sub_host(url)
+        marked = bool(host) and _host_in_list(host, self.store.state["settings"].get("subProxyHosts") or [])
         last = None
-        for v4_only in (False, True):
-            try:
-                kw = {"transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")} if v4_only else {}
-                async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
-                                             headers={"User-Agent": "v2rayN/7.0"}, **kw) as c:
-                    r = await c.get(url)
-                break
-            except Exception as e:
-                last = e
+        if not marked:
+            for v4_only in (False, True):
+                try:
+                    kw = {"transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")} if v4_only else {}
+                    async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
+                                                 headers={"User-Agent": "v2rayN/7.0"}, **kw) as c:
+                        r = await c.get(url)
+                    break
+                except Exception as e:
+                    last = e
+            else:
+                r, last = await self._fetch_sub_via_nodes(url, last)
+                if r is None:
+                    raise ApplyError("Не удалось скачать подписку: " + _sub_net_hint(last)
+                                     + ". Через прокси узлов тоже не вышло (" + _sub_net_hint(last) + ")",
+                                     str(last) or repr(last))
+                await self._remember_sub_host(host)
         else:
-            direct = _sub_net_hint(last)
-            r, last = await self._fetch_sub_via_nodes(url, last)
+            r, last = await self._fetch_sub_via_nodes(url, None)
             if r is None:
-                msg = "Не удалось скачать подписку: " + direct
-                if last is not None:
-                    msg += ". Через прокси узлов тоже не вышло (" + _sub_net_hint(last) + ")"
-                raise ApplyError(msg, str(last) or repr(last))
+                raise ApplyError("Не удалось скачать подписку через прокси узлов: "
+                                 + (_sub_net_hint(last) if last else "нет включённых узлов"),
+                                 str(last) or "")
+        return self._check_sub_resp(r)
+
+    def _check_sub_resp(self, r):
         if r.status_code >= 400:
             raise ApplyError(f"Подписка недоступна: сервер вернул HTTP {r.status_code}",
                              _sub_text_hint(r.text) + " Проверьте ссылку и срок действия подписки.")
-        text = r.text
-        if _sub_body_kind(text):
-            raise ApplyError("Сервер подписки отдал не подписку", _sub_text_hint(text))
-        return text
+        if _sub_body_kind(r.text):
+            raise ApplyError("Сервер подписки отдал не подписку", _sub_text_hint(r.text))
+        return r.text
+
+    async def _remember_sub_host(self, host):
+        """Запомнить хост подписки как «всегда через прокси» (IP у CDN плавает — храним домен)."""
+        if not host or _host_in_list(host, self.store.state["settings"].get("subProxyHosts") or []):
+            return
+        ips = ""
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+            ips = ", ".join(sorted({i[4][0] for i in infos})[:4])
+        except Exception:
+            pass
+        self.store.state["settings"]["subProxyHosts"] = \
+            (self.store.state["settings"].get("subProxyHosts") or []) + [host]
+        self.store.save()
+        self.event("info", f"Хост подписки {host}" + (f" ({ips})" if ips else "")
+                   + " добавлен в «всегда через прокси» — дальше качается только через VPN")
 
     async def _fetch_sub_via_nodes(self, url, last):
         """Резерв: скачать подписку через http-прокси тестовых inbound'ов узлов
@@ -566,27 +606,62 @@ class Panel:
             if errors:
                 detail += "\n\n" + "\n".join(errors[:5])
             raise ApplyError("В подписке нет распознанных ссылок (vless://, vmess://, trojan://, ss://)", detail)
+        desired = {}
+        for p in parsed:
+            try:
+                clean_node(p, "tmp")          # проверка корректности, p не меняется
+            except ValidationError as e:
+                errors.append(f"{p.get('name') or p.get('address')}: {e}")
+                continue
+            desired[_sub_key(p)] = p
         added = []
+        adopted = [0]
+        removed = [0]
         sub = [None]
 
         def mutate():
             sub[0] = self.store.add_subscription({"url": url, "group": gid or ""})
             s = sub[0]
-            for p in parsed:
+            claimed = set()
+            adopted_ids = set()
+            # узлы, добавленные раньше вручную с теми же реквизитами, привязываем к подписке
+            for n in self.store.nodes:
+                k = _sub_key(n)
+                if n.get("sub") is None and k in desired and k not in claimed:
+                    claimed.add(k)
+                    self.store.update_node(n["id"], {f: desired[k].get(f) for f in _SUB_SYNC} | {"sub": s["id"]})
+                    adopted_ids.add(n["id"])
+                    adopted[0] += 1
+            # оставшиеся ручные дубликаты тех же серверов убираем
+            dups = [n for n in self.store.nodes
+                    if n.get("sub") is None and n["id"] not in adopted_ids and _sub_key(n) in claimed]
+            removed[0] = len(dups)
+            for n in dups:
+                self.store.delete_node(n["id"])
+            for k, p in desired.items():
+                if k in claimed:
+                    continue
                 try:
                     added.append(self.store.add_node({**p, "sub": s["id"]}))
                 except ValidationError as e:
                     errors.append(f"{p.get('name') or p.get('address')}: {e}")
             g = self.store.group(s["group"])
             if g:
-                g["nodes"] += [n["id"] for n in added]
+                g["nodes"] += [n["id"] for n in added if n["id"] not in g["nodes"]]
             s["updatedAt"] = int(time.time())
         await self.apply(mutate)
-        self.event("info", f"Подписка «{sub[0]['name']}»: добавлено узлов {len(added)}")
-        return {"added": added, "errors": errors, "subscription": sub[0]}
+        msg = f"Подписка «{sub[0]['name']}»: добавлено узлов {len(added)}"
+        if adopted[0]:
+            msg += f", привязано существующих {adopted[0]}"
+        if removed[0]:
+            msg += f", убрано дубликатов {removed[0]}"
+        self.event("info", msg)
+        return {"added": added, "adopted": adopted[0], "removed": removed[0],
+                "errors": errors, "subscription": sub[0]}
 
     async def refresh_subscription(self, sid):
-        """Перекачать подписку и сверить узлы: обновить, добавить новые, удалить исчезнувшие."""
+        """Перекачать подписку и сверить узлы: обновить, привязать ручные с теми же
+        реквизитами, добавить новые, удалить исчезнувшие."""
         sub = self.store.subscription(sid)
         if not sub:
             raise ApplyError("Подписка не найдена")
@@ -605,31 +680,51 @@ class Panel:
                 errors.append(f"{p.get('name') or p.get('address')}: {e}")
                 continue
             desired[_sub_key(p)] = p
-        added, removed = [], []
+        updates, adopts, removed = [], [], []
+        claimed = set()
+        for n in existing:
+            k = _sub_key(n)
+            p = desired.get(k)
+            if p is None:
+                removed.append(n)
+            else:
+                claimed.add(k)
+                updates.append((n["id"], p))
+        for n in self.store.nodes:
+            k = _sub_key(n)
+            if n.get("sub") is None and k in desired and k not in claimed:
+                claimed.add(k)
+                adopts.append((n["id"], desired[k]))
+        # оставшиеся ручные дубликаты тех же серверов убираем вместе с исчезнувшими
+        adopted_ids = {nid for nid, _ in adopts}
+        removed.extend(n for n in self.store.nodes
+                       if n.get("sub") is None and n["id"] not in adopted_ids and _sub_key(n) in claimed)
+        new = [p for k, p in desired.items() if k not in claimed]
+        added = []
         updated = [0]
 
         def mutate():
-            for n in existing:
-                p = desired.pop(_sub_key(n), None)
-                if p is None:
-                    removed.append(n["name"])
-                    self.store.delete_node(n["id"])
-                else:
-                    self.store.update_node(n["id"], {f: p.get(f) for f in _SUB_SYNC})
-                    updated[0] += 1
-            for p in desired.values():
+            for nid, p in updates:
+                self.store.update_node(nid, {f: p.get(f) for f in _SUB_SYNC})
+                updated[0] += 1
+            for nid, p in adopts:
+                self.store.update_node(nid, {f: p.get(f) for f in _SUB_SYNC} | {"sub": sid})
+            for n in removed:
+                self.store.delete_node(n["id"])
+            for p in new:
                 try:
                     added.append(self.store.add_node({**p, "sub": sid}))
                 except ValidationError as e:
                     errors.append(f"{p.get('name') or p.get('address')}: {e}")
             g = self.store.group(sub["group"])
             if g:
-                g["nodes"] += [n["id"] for n in added]
+                g["nodes"] += [n["id"] for n in added if n["id"] not in g["nodes"]]
             self.store.update_subscription(sid, {"updatedAt": int(time.time())})
         await self.apply(mutate)
-        msg = f"Подписка «{sub['name']}»: добавлено {len(added)}, обновлено {updated[0]}, удалено {len(removed)}"
+        msg = (f"Подписка «{sub['name']}»: добавлено {len(added)}, обновлено {updated[0]}, "
+               f"привязано {len(adopts)}, удалено {len(removed)}")
         self.event("warn" if errors else "info", msg + (f"; не распознано строк: {len(errors)}" if errors else ""))
-        return {"added": added, "updated": updated[0], "removed": len(removed),
+        return {"added": added, "updated": updated[0], "adopted": len(adopts), "removed": len(removed),
                 "errors": errors, "subscription": self.store.subscription(sid)}
 
     async def delete_subscription(self, sid, with_nodes=False):

@@ -40,6 +40,7 @@ SETTINGS_DEFAULTS = {
     "dnsGroup": "",  # через какую группу ходят остальные DNS-серверы ("" — напрямую)
     "dnsPort": 0,  # DNS-сервер для локальной сети (0 — выключен)
     "tspuInterval": 360,
+    "subProxyHosts": [],  # хосты, подписки с которых качаются только через прокси узлов
     "geoipURL": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
     "geositeURL": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat",
 }
@@ -181,6 +182,7 @@ def clean_settings(data):
         raise ValidationError("Неизвестный уровень журнала")
     s["dns"] = _as_list(s["dns"]) or list(SETTINGS_DEFAULTS["dns"])
     s["dnsDirect"] = _as_list(s["dnsDirect"])
+    s["subProxyHosts"] = _as_list(s["subProxyHosts"])
     s["dnsGroup"] = str(s["dnsGroup"] or "")
     try:
         s["dnsPort"] = int(s["dnsPort"] or 0)

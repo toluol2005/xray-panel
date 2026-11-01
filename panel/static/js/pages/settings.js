@@ -102,6 +102,34 @@ function probeSection(ctx) {
   return sec;
 }
 
+/* ---------------- Загрузка подписок ---------------- */
+
+function subSection(ctx) {
+  const ta = textArea(listToLines(ctx.settings.subProxyHosts || []), 'sub3.example.com', 3);
+  const saveBtn = h('button.btn', { type: 'button', text: 'Сохранить' });
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    try {
+      const payload = ctx.collect();
+      payload.subProxyHosts = linesToList(ta.value);
+      const saved = await api('PUT', '/api/settings', payload);
+      ctx.settings = (saved && typeof saved === 'object') ? saved : payload;
+      await refreshState();
+      toast('Применено');
+    } catch (e) {
+      alertError(e, 'Не удалось сохранить');
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+  const sec = section('Загрузка подписок', [h('div.card', ta)],
+    'Хосты из списка панель качает только через VPN-узлы, минуя прямое подключение. '
+    + 'Хост попадает сюда сам, если прямое скачивание обрывается (ТСПУ), но список можно править и вручную — '
+    + 'по одному домену в строке. Достаточно домена: IP у CDN меняется, панель разрешает имя заново при каждом обновлении.');
+  sec.appendChild(h('div.btn-row', { style: 'margin-top:14px' }, saveBtn));
+  return sec;
+}
+
 /* ---------------- Оформление ---------------- */
 
 function appearanceSection(reg) {
@@ -157,6 +185,7 @@ export function createPage() {
     ctx.rows = {};
     body.appendChild(routingSection(st.routing || {}));
     body.appendChild(probeSection(ctx));
+    body.appendChild(subSection(ctx));
     body.appendChild(tspuToolSection());
     body.appendChild(xraySection(ctx));
     body.appendChild(backupSection());
