@@ -28,6 +28,50 @@ def _sub_key(n):
             n.get("uuid") or n.get("password") or n.get("username") or "")
 
 
+def _sub_net_hint(e):
+    """Человеческое объяснение сетевой ошибки при скачивании подписки."""
+    s = (str(e) or e.__class__.__name__).lower()
+    if isinstance(e, httpx.TimeoutException) or "timed out" in s:
+        return "сервер подписки не ответил (таймаут; возможна блокировка IPv6 — попробуйте ещё раз)"
+    if "certificate" in s or "ssl" in s:
+        return "ошибка TLS-сертификата сервера"
+    if ("name or service not known" in s or "nodename" in s or "no address associated" in s
+            or "name resolution" in s):
+        return "имя сервера не разрешается в IP (DNS)"
+    if "refused" in s:
+        return "соединение отклонено (порт закрыт)"
+    if "unreachable" in s:
+        return "сеть недостижима"
+    if "reset" in s:
+        return "соединение сброшено (возможно, блокировка ТСПУ)"
+    return (str(e) or e.__class__.__name__)[:200]
+
+
+def _sub_body_kind(text):
+    """Что сервер отдал вместо подписки (или None, если похоже на правду)."""
+    body = (text or "").strip()
+    if not body:
+        return "пустой ответ"
+    low = body.lower()
+    if low.startswith(("<!doctype", "<html")) or "<html" in low[:300]:
+        return "HTML-страница вместо подписки (страница входа, ошибка или подписка истекла)"
+    if "proxies:" in low[:2000]:
+        return "конфиг Clash — панель понимает ссылки vless://…, vmess://… и base64"
+    return None
+
+
+def _sub_head(text, n=120):
+    return " ".join((text or "").strip()[:n].split())
+
+
+def _sub_text_hint(text):
+    kind = _sub_body_kind(text)
+    head = _sub_head(text)
+    if kind:
+        return f"{kind}. Начало ответа: «{head}»"
+    return f"Начало ответа сервера: «{head}»"
+
+
 class ApplyError(Exception):
     def __init__(self, message, detail=""):
         super().__init__(message)
@@ -434,14 +478,27 @@ class Panel:
 
     # --- импорт / подписки -----------------------------------------------------
     async def _fetch_sub(self, url):
-        try:
-            async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
-                                         headers={"User-Agent": "v2rayN/7.0"}) as c:
-                r = await c.get(url)
-                r.raise_for_status()
-                return r.text
-        except Exception as e:
-            raise ApplyError("Не удалось скачать подписку", str(e))
+        """Скачать подписку. При сетевом сбое — повтор только через IPv4 (на хостах
+        с «битым» IPv6 curl проходит, а Python-клиент виснет на AAAA-адресах)."""
+        last = None
+        for v4_only in (False, True):
+            try:
+                kw = {"transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")} if v4_only else {}
+                async with httpx.AsyncClient(trust_env=False, timeout=20, follow_redirects=True,
+                                             headers={"User-Agent": "v2rayN/7.0"}, **kw) as c:
+                    r = await c.get(url)
+                break
+            except Exception as e:
+                last = e
+        else:
+            raise ApplyError("Не удалось скачать подписку: " + _sub_net_hint(last), str(last))
+        if r.status_code >= 400:
+            raise ApplyError(f"Подписка недоступна: сервер вернул HTTP {r.status_code}",
+                             _sub_text_hint(r.text) + " Проверьте ссылку и срок действия подписки.")
+        text = r.text
+        if _sub_body_kind(text):
+            raise ApplyError("Сервер подписки отдал не подписку", _sub_text_hint(text))
+        return text
 
     async def import_links(self, text, gid=None):
         text = text.strip()
@@ -476,7 +533,10 @@ class Panel:
         text = await self._fetch_sub(url)
         parsed, errors = links.parse_text(text)
         if not parsed:
-            raise ApplyError("В подписке не найдено ни одной ссылки", "\n".join(errors))
+            detail = _sub_text_hint(text)
+            if errors:
+                detail += "\n\n" + "\n".join(errors[:5])
+            raise ApplyError("В подписке нет распознанных ссылок (vless://, vmess://, trojan://, ss://)", detail)
         added = []
         sub = [None]
 
@@ -503,6 +563,11 @@ class Panel:
             raise ApplyError("Подписка не найдена")
         text = await self._fetch_sub(sub["url"])
         parsed, errors = links.parse_text(text)
+        existing = [x for x in self.store.nodes if x.get("sub") == sid]
+        if not parsed and existing:
+            # страховка: сбойный (пустой/кривой) ответ не должен удалить все узлы подписки
+            raise ApplyError("В подписке нет ни одной ссылки — обновление отменено, узлы не тронуты",
+                             _sub_text_hint(text))
         desired = {}
         for p in parsed:
             try:
@@ -515,7 +580,7 @@ class Panel:
         updated = [0]
 
         def mutate():
-            for n in [x for x in self.store.nodes if x.get("sub") == sid]:
+            for n in existing:
                 p = desired.pop(_sub_key(n), None)
                 if p is None:
                     removed.append(n["name"])
