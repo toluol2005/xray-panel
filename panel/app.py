@@ -17,7 +17,7 @@ from . import links
 from .core import ApplyError, Panel
 from .store import ValidationError
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 HERE = os.path.dirname(__file__)
 CONFIG_PATH = os.environ.get("PANEL_CONFIG", "/data/panel.yaml")
 

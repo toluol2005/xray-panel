@@ -23,10 +23,84 @@ _SUB_SYNC = ("name", "network", "security", "sni", "fingerprint", "alpn", "allow
              "encryption", "flow", "alterId", "method")
 
 
+def _norm_key(n, fields):
+    """Нормализованный кортеж значений узла (типы приведены) для сопоставления."""
+    out = []
+    for f in fields:
+        v = n.get(f)
+        if f in ("port", "alterId"):
+            try:
+                v = int(v or 0)
+            except (TypeError, ValueError):
+                v = 0
+        elif f == "allowInsecure":
+            v = bool(v)
+        else:
+            v = str(v or "")
+        out.append(v)
+    return tuple(out)
+
+
+def _full_key(n):
+    """Полный слепок конфигурации узла (без имени/заметок/включённости):
+    варианты одного сервера с разными транспортами/SNI остаются разными узлами."""
+    return _norm_key(n, ("protocol", "address", "port", "uuid", "password", "username",
+                         "network", "security", "sni", "fingerprint", "alpn", "allowInsecure",
+                         "publicKey", "shortId", "spiderX", "path", "host", "serviceName",
+                         "mode", "encryption", "flow", "alterId", "method"))
+
+
 def _sub_key(n):
-    """Ключ узла для сверки подписки: протокол + адрес + порт + секрет."""
-    return (n["protocol"], n["address"], int(n["port"]),
-            n.get("uuid") or n.get("password") or n.get("username") or "")
+    """Серверная идентичность: протокол + адрес + порт + секрет."""
+    return _norm_key(n, ("protocol", "address", "port", "uuid", "password", "username"))
+
+
+def _match_sub(items, own, manual):
+    """Сопоставить элементы подписки с существующими узлами.
+
+    Сначала точное совпадение полной конфигурации (свои и ручные), затем — по серверу
+    (адрес+порт+секрет, только свои узлы), чтобы поймать смену SNI/транспорта у «того же»
+    узла. Возвращает (updates, adopts, new, removed): пары (id узла, параметры), новые
+    параметры и узлы на удаление (исчезнувшие из подписки + ручные дубликаты её серверов)."""
+    updates, adopts, new, removed = [], [], [], []
+    claimed_nodes, claimed_items = set(), set()
+    by_full, by_srv = {}, {}
+    for n in own + manual:
+        by_full.setdefault(_full_key(n), []).append(n)
+    for n in own:
+        by_srv.setdefault(_sub_key(n), []).append(n)
+
+    def claim(n, p, i):
+        claimed_nodes.add(n["id"])
+        claimed_items.add(i)
+        if n.get("sub") is None:
+            adopts.append((n["id"], p))
+        else:
+            updates.append((n["id"], p))
+
+    for i, p in enumerate(items):                     # 1. точное совпадение конфигурации
+        for n in by_full.get(_full_key(p)) or []:
+            if n["id"] not in claimed_nodes:
+                claim(n, p, i)
+                break
+    for i, p in enumerate(items):                     # 2. тот же сервер, сменились параметры
+        if i in claimed_items:
+            continue
+        for n in by_srv.get(_sub_key(p)) or []:
+            if n["id"] not in claimed_nodes:
+                claim(n, p, i)
+                break
+    for i, p in enumerate(items):                     # 3. не нашлось — новый узел
+        if i not in claimed_items:
+            new.append(p)
+    srv_in_sub = {_sub_key(p) for p in items}
+    for n in own:                                     # свои без пары — исчезли из подписки
+        if n["id"] not in claimed_nodes:
+            removed.append(n)
+    for n in manual:                                  # ручные копии серверов из подписки — дубликаты
+        if n["id"] not in claimed_nodes and _sub_key(n) in srv_in_sub:
+            removed.append(n)
+    return updates, adopts, new, removed
 
 
 def _sub_net_hint(e):
@@ -601,46 +675,32 @@ class Panel:
     async def _import_subscription(self, url, gid):
         text = await self._fetch_sub(url)
         parsed, errors = links.parse_text(text)
-        if not parsed:
-            detail = _sub_text_hint(text)
-            if errors:
-                detail += "\n\n" + "\n".join(errors[:5])
-            raise ApplyError("В подписке нет распознанных ссылок (vless://, vmess://, trojan://, ss://)", detail)
-        desired = {}
+        items = []
         for p in parsed:
             try:
                 clean_node(p, "tmp")          # проверка корректности, p не меняется
             except ValidationError as e:
                 errors.append(f"{p.get('name') or p.get('address')}: {e}")
                 continue
-            desired[_sub_key(p)] = p
+            items.append(p)
+        if not items:
+            detail = _sub_text_hint(text)
+            if errors:
+                detail += "\n\n" + "\n".join(errors[:5])
+            raise ApplyError("В подписке нет распознанных ссылок (vless://, vmess://, trojan://, ss://)", detail)
+        manual = [x for x in self.store.nodes if x.get("sub") is None]
+        _, adopts, new, removed = _match_sub(items, [], manual)
         added = []
-        adopted = [0]
-        removed = [0]
         sub = [None]
 
         def mutate():
             sub[0] = self.store.add_subscription({"url": url, "group": gid or ""})
             s = sub[0]
-            claimed = set()
-            adopted_ids = set()
-            # узлы, добавленные раньше вручную с теми же реквизитами, привязываем к подписке
-            for n in self.store.nodes:
-                k = _sub_key(n)
-                if n.get("sub") is None and k in desired and k not in claimed:
-                    claimed.add(k)
-                    self.store.update_node(n["id"], {f: desired[k].get(f) for f in _SUB_SYNC} | {"sub": s["id"]})
-                    adopted_ids.add(n["id"])
-                    adopted[0] += 1
-            # оставшиеся ручные дубликаты тех же серверов убираем
-            dups = [n for n in self.store.nodes
-                    if n.get("sub") is None and n["id"] not in adopted_ids and _sub_key(n) in claimed]
-            removed[0] = len(dups)
-            for n in dups:
+            for nid, p in adopts:             # ручные узлы с теми же реквизитами — к подписке
+                self.store.update_node(nid, {f: p.get(f) for f in _SUB_SYNC} | {"sub": s["id"]})
+            for n in removed:                 # ручные дубликаты серверов из подписки
                 self.store.delete_node(n["id"])
-            for k, p in desired.items():
-                if k in claimed:
-                    continue
+            for p in new:
                 try:
                     added.append(self.store.add_node({**p, "sub": s["id"]}))
                 except ValidationError as e:
@@ -651,55 +711,37 @@ class Panel:
             s["updatedAt"] = int(time.time())
         await self.apply(mutate)
         msg = f"Подписка «{sub[0]['name']}»: добавлено узлов {len(added)}"
-        if adopted[0]:
-            msg += f", привязано существующих {adopted[0]}"
-        if removed[0]:
-            msg += f", убрано дубликатов {removed[0]}"
+        if adopts:
+            msg += f", привязано существующих {len(adopts)}"
+        if removed:
+            msg += f", убрано дубликатов {len(removed)}"
         self.event("info", msg)
-        return {"added": added, "adopted": adopted[0], "removed": removed[0],
+        return {"added": added, "adopted": len(adopts), "removed": len(removed),
                 "errors": errors, "subscription": sub[0]}
 
     async def refresh_subscription(self, sid):
         """Перекачать подписку и сверить узлы: обновить, привязать ручные с теми же
-        реквизитами, добавить новые, удалить исчезнувшие."""
+        реквизитами, добавить новые, удалить исчезнувшие и ручные дубликаты."""
         sub = self.store.subscription(sid)
         if not sub:
             raise ApplyError("Подписка не найдена")
         text = await self._fetch_sub(sub["url"])
         parsed, errors = links.parse_text(text)
         existing = [x for x in self.store.nodes if x.get("sub") == sid]
-        if not parsed and existing:
-            # страховка: сбойный (пустой/кривой) ответ не должен удалить все узлы подписки
-            raise ApplyError("В подписке нет ни одной ссылки — обновление отменено, узлы не тронуты",
-                             _sub_text_hint(text))
-        desired = {}
+        items = []
         for p in parsed:
             try:
                 clean_node(p, "tmp")          # проверка корректности, p не меняется
             except ValidationError as e:
                 errors.append(f"{p.get('name') or p.get('address')}: {e}")
                 continue
-            desired[_sub_key(p)] = p
-        updates, adopts, removed = [], [], []
-        claimed = set()
-        for n in existing:
-            k = _sub_key(n)
-            p = desired.get(k)
-            if p is None:
-                removed.append(n)
-            else:
-                claimed.add(k)
-                updates.append((n["id"], p))
-        for n in self.store.nodes:
-            k = _sub_key(n)
-            if n.get("sub") is None and k in desired and k not in claimed:
-                claimed.add(k)
-                adopts.append((n["id"], desired[k]))
-        # оставшиеся ручные дубликаты тех же серверов убираем вместе с исчезнувшими
-        adopted_ids = {nid for nid, _ in adopts}
-        removed.extend(n for n in self.store.nodes
-                       if n.get("sub") is None and n["id"] not in adopted_ids and _sub_key(n) in claimed)
-        new = [p for k, p in desired.items() if k not in claimed]
+            items.append(p)
+        if not items and existing:
+            # страховка: сбойный (пустой/кривой) ответ не должен удалить все узлы подписки
+            raise ApplyError("В подписке нет ни одной ссылки — обновление отменено, узлы не тронуты",
+                             _sub_text_hint(text))
+        manual = [x for x in self.store.nodes if x.get("sub") is None]
+        updates, adopts, new, removed = _match_sub(items, existing, manual)
         added = []
         updated = [0]
 
